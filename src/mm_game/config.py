@@ -2,7 +2,12 @@
 
 ``GameConfig`` is inert description: a frozen dataclass you can serialise, diff
 and put in a log line. It holds no randomness -- a session is ``(config, seed)``
-and the seed lives with the engine, not here (brief 01, section 9, Q1).
+and the seed lives with the engine, not here. Keeping the two apart is what
+lets config equality mean "same scenario": running one scenario over 500 seeds
+leaves this half byte-identical across all 500, so a diff of two run headers
+shows the config was held fixed. A seed field would turn that sweep into 500
+different configs and "same config, different seed" would stop being
+expressible.
 
 Validation raises ``ValueError`` explicitly rather than using ``assert``:
 ``python -O`` strips ``assert`` statements entirely, so an assert-based guard
