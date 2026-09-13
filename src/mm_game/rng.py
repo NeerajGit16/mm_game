@@ -44,11 +44,24 @@ class Stream(StrEnum):
     session; ``AGENTS`` is separate from everything so "strategy A vs strategy B
     on the same market" is a thing you can actually run.
 
+    The fair value process is split four ways for the same reason. ``EVENTS``
+    is the calendar of scheduled prints (how many, when); ``JUMPS`` is each
+    print's hidden outcome, substreamed on event ordinal; ``DRIFT`` is the
+    pre-event positioning regime, also per event; ``SCREEN`` is observation
+    noise on the public screen. So dialling jump size never moves the
+    diffusion, changing the drift model never moves a jump, and the screen's
+    noise is not the truth's. (``EVENTS`` here means data prints; the
+    ``events.py`` module is the log spine and draws nothing.)
+
     ``scoring``, ``book`` and ``events`` consume no randomness and have no
     stream.
     """
 
     FAIR_VALUE = "fair_value"
+    EVENTS = "events"
+    JUMPS = "jumps"
+    DRIFT = "drift"
+    SCREEN = "screen"
     FLOW_ARRIVAL = "flow_arrival"
     FLOW_SIZE = "flow_size"
     FLOW_DIRECTION = "flow_direction"
