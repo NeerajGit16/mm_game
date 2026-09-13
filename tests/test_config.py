@@ -33,6 +33,7 @@ def test_defaults_match_the_instrument_spec():
     assert cfg.tick_size == 0.5
     assert cfg.tick_value == 25.0
     assert cfg.lot_size == 1
+    assert cfg.bp_per_point == 100.0
     assert cfg.start_level == 9550.0
     assert cfg.session_length == 7200
     assert cfg.dt == 0.1
@@ -58,6 +59,17 @@ def test_tick_is_half_a_basis_point_and_fifty_dollars_per_bp():
     cfg = GameConfig()
     dollars_per_bp_per_lot = cfg.tick_value / cfg.tick_size
     assert dollars_per_bp_per_lot == 50.0
+
+
+def test_display_convention_is_pinned():
+    """The model works in bp; a screen shows points. 9550bp is 95.50 and a
+    half-bp tick is 0.005, three decimals. Pinned so the conversion is never
+    reinvented from memory at a display site -- the tick-size bug was a
+    convention living in two places."""
+    cfg = GameConfig()
+    assert cfg.start_level / cfg.bp_per_point == 95.5
+    assert cfg.tick_size / cfg.bp_per_point == 0.005
+    assert (cfg.start_level + 7 * cfg.tick_size) / cfg.bp_per_point == 95.535
 
 
 def test_default_grid_is_72000_steps():
@@ -139,6 +151,9 @@ def test_round_trips_through_json_exactly():
         ("tick_value", -25.0),
         ("lot_size", 0),
         ("lot_size", -1),
+        ("bp_per_point", 0),
+        ("bp_per_point", -100.0),
+        ("bp_per_point", float("nan")),
         ("start_level", float("nan")),
         ("start_level", float("inf")),
         ("session_length", 0),

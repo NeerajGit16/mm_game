@@ -54,6 +54,10 @@ class GameConfig:
     tick_size: float = 0.5
     tick_value: float = 25.0
     lot_size: int = 1
+    # Display convention: one price point is 100bp, so a level of 9553.5 shows
+    # as 95.535 and a half-bp tick as 0.005. Recorded here so the conversion
+    # lives in one place; the model itself never uses it. Display is UI work.
+    bp_per_point: float = 100.0
     # Cosmetic: nothing in the model depends on the level (arithmetic process,
     # no reversion, absolute tick size). 9550 displays as 95.50.
     start_level: float = 9550.0
@@ -137,6 +141,10 @@ class GameConfig:
             raise ValueError(f"tick_value must be positive, got {self.tick_value}")
         if not self.lot_size >= 1:
             raise ValueError(f"lot_size must be at least 1, got {self.lot_size}")
+        if not (math.isfinite(self.bp_per_point) and self.bp_per_point > 0):
+            raise ValueError(
+                f"bp_per_point must be finite and positive, got {self.bp_per_point}"
+            )
         if not math.isfinite(self.start_level):
             raise ValueError(f"start_level must be finite, got {self.start_level}")
         if not self.session_length > 0:
