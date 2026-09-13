@@ -25,9 +25,30 @@ from mm_game.rng import (
     canary,
     stream_key,
 )
-from mm_game.rng import _RUN_KEY
+from mm_game.rng import _CANARY_KEYS, _RUN_KEY, _canary_generator
 
 SRC_DIR = Path(mm_game.__file__).resolve().parent
+
+# The pattern guarding src/ against ungoverned randomness. At module level so
+# the pattern itself can be tested: the scan over src/ passes vacuously while
+# the tree is clean, so nothing else would notice if the pattern quietly
+# stopped matching the thing it exists to catch.
+BANNED_RANDOMNESS = re.compile(
+    # Calls and attribute access, not mentions. A module may legitimately
+    # annotate a generator it was handed, so `np.random.Generator` as a type
+    # must pass while every way of *making* randomness is caught.
+    #
+    # Lowercase attribute access: normal, seed, default_rng, rand, shuffle.
+    r"np\.random\.[a-z_]"
+    # Any call, which is what catches the capitalised constructors the rule
+    # above steps over: RandomState(, PCG64(, SeedSequence(, and Generator(
+    # built by hand. Keyed on a paren with no space before it, so a real call
+    # matches and prose like "np.random.Generator (the new API)" does not.
+    r"|np\.random\.[A-Za-z_]\w*\("
+    r"|from\s+numpy\.random\s+import"
+    r"|^\s*import\s+random\b",
+    re.MULTILINE,
+)
 
 
 # --------------------------------------------------------------------------
@@ -260,6 +281,31 @@ def test_canary_is_independent_of_the_session():
     assert canary() == canary()
 
 
+def test_canary_does_not_depend_on_the_stream_enum():
+    """Renaming a stream must not move the canary.
+
+    A stream's key derives from its name, so routing the canary through a
+    Stream member would make an ordinary rename -- FLOW_DIRECTION to FLOW_SIDE,
+    say -- change the canary values. Every header recorded before that rename
+    would then mismatch on replay and report numpy drift when numpy never
+    moved, which is precisely the false positive the canary exists to rule out.
+    The stream inventory is expected to grow; these keys are frozen.
+
+    Checked against the bytecode's global references rather than the source
+    text, so the docstrings here and in rng.py stay free to name Stream while
+    the code does not.
+    """
+    referenced = set(canary.__code__.co_names) | set(
+        _canary_generator.__code__.co_names
+    )
+    assert not referenced & {"Stream", "stream_key", "RngStreams", "stream"}
+
+    canary_keys = set(_CANARY_KEYS.values())
+    assert len(canary_keys) == len(_CANARY_KEYS), "canary keys collide with each other"
+    assert not canary_keys & {stream_key(n) for n in Stream}, "canary aliases a stream"
+    assert _RUN_KEY not in canary_keys
+
+
 def test_canary_covers_each_transform_separately():
     """One entry per transform, each from its own stream, so a mismatch names
     the transform that moved rather than shifting everything after it."""
@@ -342,41 +388,41 @@ def test_canary_golden_values():
     - After a numpy bump: the transforms moved, so every recorded log's canary
       will mismatch on replay. That is the header working. Bump SCHEME_VERSION
       and re-baseline these values deliberately.
-    - After editing canary() itself (seed, streams, draw count): you changed
+    - After editing canary() itself (seed, keys, draw count): you changed
       what old headers are compared against, and every one of them becomes
       unreplayable. Same remedy, and make sure it was on purpose.
     """
     assert CANARY_SEED == 0
     assert canary() == {
         "uniform": [
-            0.19832048442242656,
-            0.9822061104066486,
-            0.19702657623328468,
-            0.46168153481564456,
-            0.8875674742141777,
-            0.33499009500010324,
-            0.9503600523614734,
-            0.7873596643943469,
+            0.6102693685918309,
+            0.8856108863769525,
+            0.5060689109120532,
+            0.38579341660724853,
+            0.9400262934616919,
+            0.6377295697663863,
+            0.8016447928952133,
+            0.6377681574555134,
         ],
         "normal": [
-            -0.2690047809335765,
-            -1.0766519465814615,
-            0.2052198643135207,
-            -0.7599372785895425,
-            0.4766047261485515,
-            1.3420144866823223,
-            -0.19662665338487875,
-            2.3260120848287684,
+            1.0121395440320466,
+            -0.8884190466634407,
+            -1.6098766486664007,
+            1.7086221260735914,
+            0.3653358462363417,
+            0.050640144829229274,
+            0.7896599733115955,
+            -0.42471957299739915,
         ],
         "exponential": [
-            0.8402710746863868,
-            0.2508906614229817,
-            0.00483297276775258,
-            0.0285235328058251,
-            0.540277865849249,
-            4.312198958523308,
-            0.39248528351981965,
-            0.6549924093535895,
+            0.5959818996696361,
+            1.5023122620235008,
+            0.3654006347627972,
+            0.5182260944437272,
+            0.1858248913841722,
+            1.8799180322568223,
+            0.47694721171670634,
+            0.1607491123108291,
         ],
     }
 
@@ -391,16 +437,48 @@ def test_no_ungoverned_randomness_in_src():
 
     Nothing else in the test suite would catch it, so grep for it here.
     """
-    banned = re.compile(r"\bnp\.random\.|\brandom\.|^\s*import\s+random\b", re.MULTILINE)
     offenders = []
     for path in SRC_DIR.rglob("*.py"):
         if path.name == "rng.py":
             continue  # the one module allowed to touch numpy's RNG API
         for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            if banned.search(line):
+            if BANNED_RANDOMNESS.search(line):
                 offenders.append(f"{path.relative_to(SRC_DIR.parent)}:{lineno}: {line.strip()}")
 
     assert not offenders, "ungoverned randomness found:\n" + "\n".join(offenders)
+
+
+@pytest.mark.parametrize(
+    "line,is_banned",
+    [
+        # Calls that make the replay guarantee a lie.
+        ("    x = np.random.normal(0, 1)", True),
+        ("np.random.seed(42)", True),
+        ("    rng = np.random.default_rng(7)", True),
+        ("    rng = np.random.RandomState(7).normal()", True),
+        ("    bg = np.random.PCG64(12)", True),
+        ("    g = np.random.Generator(np.random.PCG64(1))", True),
+        ("from numpy.random import Generator, default_rng", True),
+        ("import random", True),
+        ("    import random", True),
+        # Legitimate, and the old pattern rejected the first two of these.
+        ("def build(gen: np.random.Generator) -> None: ...", False),
+        ("    self._cache: dict[Stream, np.random.Generator] = {}", False),
+        ('    """Sizes are drawn at random."""', False),
+        ("    # tie-breaks are random.", False),
+        ("    # see np.random.Generator (the new-style API)", False),
+        ("import randomness_notes", False),
+    ],
+)
+def test_banned_randomness_pattern_catches_calls_not_mentions(line, is_banned):
+    """The scan above is vacuous while src/ is clean, so pin the pattern here.
+
+    Both directions matter. Too loose and it fires on a `np.random.Generator`
+    annotation or the word "random" in prose, and the usual fix for a noisy
+    guard is to weaken or delete it. Too tight and a real `np.random.normal(`
+    slips through, which nothing else in the suite would catch.
+    """
+    assert bool(BANNED_RANDOMNESS.search(line)) is is_banned
 
 
 def test_rng_module_has_no_internal_imports():

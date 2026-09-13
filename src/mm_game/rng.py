@@ -83,20 +83,33 @@ _RUN_KEY: int = _digest_key("__run__")
 # uint32 words drawn to build a child seed in spawn_run -> a 128-bit seed.
 _RUN_SEED_WORDS: int = 4
 
-# Canary: the first draws from canonical streams at a fixed seed, recorded in
-# every log header by provenance(). numpy froze RandomState, not Generator
-# (NEP 19): the PCG64 bit stream is stable, but the transform from bits to a
-# distribution -- the ziggurat behind normal() and exponential() -- may change
-# in a minor release. The version string only says numpy differs; the canary
-# says whether the numbers did. Replay regenerates canary() and compares it
-# with the header: a match means the log replays whatever the version strings
-# say, a mismatch names the transform that moved. Each entry draws from its
-# own stream so one transform changing does not shift the others.
+# Canary: fixed draws at a fixed seed, recorded in every log header by
+# provenance(). numpy froze RandomState, not Generator (NEP 19): the PCG64 bit
+# stream is stable, but the transform from bits to a distribution -- the
+# ziggurat behind normal() and exponential() -- may change in a minor release.
+# The version string only says numpy differs; the canary says whether the
+# numbers did. Replay regenerates canary() and compares it with the header: a
+# match means the log replays whatever the version strings say, a mismatch
+# names the transform that moved.
 #
-# The canary is part of the scheme: changing its seed, its streams or its draw
+# The keys below are deliberately NOT Stream members. The stream inventory is
+# expected to grow and be renamed as the model develops, and a stream's key is
+# derived from its name -- so routing the canary through Stream would make an
+# ordinary rename change the canary's values, and every previously recorded
+# header would then mismatch and report numpy drift when nothing drifted. These
+# three names are frozen for the life of the scheme; the Stream enum is free to
+# change around them. Each entry gets its own key so one transform changing
+# does not shift the others.
+#
+# The canary is part of the scheme: changing its seed, these keys or its draw
 # count invalidates every recorded header, so it bumps SCHEME_VERSION.
 CANARY_SEED: int = 0
 _CANARY_DRAWS: int = 8
+_CANARY_KEYS: dict[str, int] = {
+    "uniform": _digest_key("__canary_uniform__"),
+    "normal": _digest_key("__canary_normal__"),
+    "exponential": _digest_key("__canary_exponential__"),
+}
 
 
 class RngStreams:
@@ -198,21 +211,30 @@ class RngStreams:
         }
 
 
+def _canary_generator(entry: str) -> np.random.Generator:
+    """Generator for one canary entry, derived independently of ``Stream``."""
+    return np.random.default_rng(
+        np.random.SeedSequence(entropy=CANARY_SEED, spawn_key=(_CANARY_KEYS[entry],))
+    )
+
+
 def canary() -> dict[str, list[float]]:
     """The canary draws recorded in every log header; see ``CANARY_SEED``.
 
-    Independent of any session: built from a throwaway ``RngStreams`` at the
-    canonical seed, so calling it never advances a caller's streams. Three
-    entries, one per transform the simulation depends on, each from its own
-    stream so a mismatch localises: ``uniform`` moving means the bit stream
+    Independent of any session and of the ``Stream`` inventory: derived from
+    ``_CANARY_KEYS``, which are frozen, so renaming or adding a stream leaves
+    these values untouched and old headers keep verifying. Calling it never
+    advances a caller's streams.
+
+    Three entries, one per transform the simulation depends on, each from its
+    own key so a mismatch localises: ``uniform`` moving means the bit stream
     itself changed and everything else will have too; ``normal`` or
     ``exponential`` alone means that transform's algorithm did.
     """
-    rng = RngStreams(CANARY_SEED)
     return {
-        "uniform": rng.stream(Stream.FLOW_DIRECTION).random(size=_CANARY_DRAWS).tolist(),
-        "normal": rng.stream(Stream.FAIR_VALUE).normal(size=_CANARY_DRAWS).tolist(),
-        "exponential": rng.stream(Stream.FLOW_ARRIVAL)
+        "uniform": _canary_generator("uniform").random(size=_CANARY_DRAWS).tolist(),
+        "normal": _canary_generator("normal").normal(size=_CANARY_DRAWS).tolist(),
+        "exponential": _canary_generator("exponential")
         .exponential(size=_CANARY_DRAWS)
         .tolist(),
     }
