@@ -12,9 +12,10 @@ and no reversion, plus 0..2 scheduled prints per session. Each print is a
 symmetric jump the market pre-positions for: a drift regime of random duration
 and magnitude runs into it, agreeing with the print's sign only 60% of the
 time. The public screen is the truth plus a persistent observation error that
-a minute of averaging cannot remove. Nothing here is exploitable without
-reading flow: no reversion level to lean on, no constant drift, no asymmetry
-in the jumps, no screen you can average your way to the truth from.
+a minute of averaging cannot remove, rounded to the tick. Nothing here is
+exploitable without reading flow: no reversion level to lean on, no constant
+drift, no asymmetry in the jumps, no screen you can average your way to the
+truth from.
 
 This module is a producer of data, not a service. ``generate`` builds a
 ``FairValuePath`` once; the engine holds it and hands each participant the
@@ -118,7 +119,8 @@ class PublicView:
 
     Holds no reference to the truth. Screen readings are stored per refresh,
     not per step, so the age of the reading a participant is looking at falls
-    out of the step arithmetic.
+    out of the step arithmetic. Every reading is a whole number of ticks from
+    the session's start level: the screen quotes in ticks, as a screen does.
     """
 
     n_steps: int
@@ -422,13 +424,19 @@ def generate(config: GameConfig, rng: RngStreams) -> FairValuePath:
     values = config.start_level + relative
 
     # Screen: the truth at each refresh step plus a persistent observation
-    # error, from the instrument's own observation generator. Drawn up front
-    # like everything else; one standard normal per refresh whatever the
-    # correlation time, so the draw count is a function of config alone.
+    # error, from the instrument's own observation generator, then rounded to
+    # the tick. Drawn up front like everything else; one standard normal per
+    # refresh whatever the correlation time, so the draw count is a function
+    # of config alone. Rounding happens after the error and in level-relative
+    # space, so every reading is a whole number of ticks from start_level
+    # whatever the level is, and the invariance to start_level stays exact.
+    # The persistent error underneath is what makes the rounded screen sit on
+    # one tick for a while and then flip, rather than jitter between ticks.
     r = config.screen_refresh_steps
     obs_steps = np.arange(n // r + 1) * r
     z = rng.substream(Stream.SCREEN, INSTRUMENT_ORDINAL).standard_normal(len(obs_steps))
-    screen = values[obs_steps] + _screen_error(config, z)
+    observed = relative[obs_steps] + _screen_error(config, z)
+    screen = config.start_level + np.round(observed / config.tick_size) * config.tick_size
 
     event_steps = _freeze(event_steps)
     public = PublicView(

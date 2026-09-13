@@ -21,11 +21,13 @@ import pytest
 import mm_game
 from mm_game.config import GameConfig
 from mm_game.fair_value import (
+    INSTRUMENT_ORDINAL,
     DriftWindow,
     EventMarkOut,
     FairValuePath,
     PublicView,
     _drift_increments,
+    _screen_error,
     generate,
     session_sigma,
     sigma_per_step,
@@ -148,9 +150,8 @@ def test_event_count_never_moves_the_diffusion():
     quiet = generate(GameConfig(max_events=0), RngStreams(7))
     eventful = generate(GameConfig(max_events=2), RngStreams(7))
     assert quiet.event_steps.size == 0
+    assert eventful.event_steps.size > 0
     np.testing.assert_array_equal(quiet.diffusion, eventful.diffusion)
-    np.testing.assert_array_equal(quiet.public.screen - quiet.values[::quiet.public.refresh_steps],
-                                  eventful.public.screen - eventful.values[::eventful.public.refresh_steps])
 
 
 @pytest.mark.parametrize(
@@ -477,13 +478,15 @@ def test_jumps_within_uses_a_half_open_window_and_clamps():
 # --------------------------------------------------------------------------
 
 
-def screen_residuals(cfg: GameConfig, seeds: range) -> list[np.ndarray]:
-    r = cfg.screen_refresh_steps
-    out = []
-    for s in seeds:
-        p = generate(cfg, RngStreams(s))
-        out.append(p.public.screen - p.values[::r])
-    return out
+def screen_errors(cfg: GameConfig, seeds: range) -> list[np.ndarray]:
+    """The AR(1) error itself, before rounding, from the generator the screen
+    uses. The rounded screen's residual mixes in a uniform rounding error, so
+    the AR(1) statistics are pinned on the error function directly."""
+    n = cfg.n_steps // cfg.screen_refresh_steps + 1
+    return [
+        _screen_error(cfg, RngStreams(s).substream(Stream.SCREEN, INSTRUMENT_ORDINAL).standard_normal(n))
+        for s in seeds
+    ]
 
 
 def lag1_autocorr(x: np.ndarray) -> float:
@@ -502,16 +505,13 @@ def test_screen_error_is_persistent_and_bounded():
     """
     cfg = GameConfig()
     phi = math.exp(-cfg.screen_refresh_s / cfg.screen_noise_corr_s)
-    resid = screen_residuals(cfg, range(20))
-    pooled = np.concatenate(resid)
+    errs = screen_errors(cfg, range(20))
+    pooled = np.concatenate(errs)
     assert math.isclose(pooled.std(ddof=1), cfg.screen_noise_bp, rel_tol=0.10)
     assert abs(pooled.mean()) < 0.1
-    assert abs(np.mean([lag1_autocorr(x) for x in resid]) - phi) < 0.03
-    first = np.array([x[0] for x in screen_residuals(cfg, range(200))])
+    assert abs(np.mean([lag1_autocorr(x) for x in errs]) - phi) < 0.03
+    first = np.array([x[0] for x in screen_errors(cfg, range(200))])
     assert 0.35 < first.std(ddof=1) < 0.65
-
-    clean = generate(GameConfig(screen_noise_bp=0.0), RngStreams(6))
-    np.testing.assert_array_equal(clean.public.screen, clean.values[:: cfg.screen_refresh_steps])
 
 
 def test_screen_error_cannot_be_averaged_away():
@@ -522,12 +522,11 @@ def test_screen_error_cannot_be_averaged_away():
     readings, not 12. A correlation time of 0 recovers the white screen, and
     both regimes are checked so the parameter is proven to do something.
     """
-    r = GameConfig().screen_refresh_steps
     n_block = round(60.0 / GameConfig().screen_refresh_s)  # 12 readings per minute
 
     def minute_average_std(cfg: GameConfig) -> float:
         blocks = []
-        for x in screen_residuals(cfg, range(20)):
+        for x in screen_errors(cfg, range(20)):
             usable = (len(x) // n_block) * n_block
             blocks.append(x[:usable].reshape(-1, n_block).mean(axis=1))
         return float(np.concatenate(blocks).std(ddof=1))
@@ -536,7 +535,58 @@ def test_screen_error_cannot_be_averaged_away():
     white = minute_average_std(GameConfig(screen_noise_corr_s=0.0))
     assert 0.36 < persistent < 0.54  # expected 0.450bp
     assert 0.10 < white < 0.19  # expected 0.144bp
-    assert abs(np.mean([lag1_autocorr(x) for x in screen_residuals(GameConfig(screen_noise_corr_s=0.0), range(20))])) < 0.05
+    assert abs(np.mean([lag1_autocorr(x) for x in screen_errors(GameConfig(screen_noise_corr_s=0.0), range(20))])) < 0.05
+
+
+def test_screen_tracks_truth_through_error_and_rounding():
+    """End to end: the residual of the rounded screen against the truth has
+    the AR(1) stdev plus a uniform rounding error of stdev tick/sqrt(12), is
+    centred, and with the error switched off the screen is exactly the truth
+    rounded to the tick -- not the truth."""
+    cfg = GameConfig()
+    r = cfg.screen_refresh_steps
+    resid = np.concatenate(
+        [(p := generate(cfg, RngStreams(s))).public.screen - p.values[::r] for s in range(20)]
+    )
+    expected = math.sqrt(cfg.screen_noise_bp**2 + cfg.tick_size**2 / 12)
+    assert math.isclose(resid.std(ddof=1), expected, rel_tol=0.10)
+    assert abs(resid.mean()) < 0.1
+
+    clean = generate(GameConfig(screen_noise_bp=0.0), RngStreams(6))
+    rounded_truth = clean.start_level + np.round(clean.relative[::r] / cfg.tick_size) * cfg.tick_size
+    np.testing.assert_array_equal(clean.public.screen, rounded_truth)
+    assert not np.array_equal(clean.public.screen, clean.values[::r])
+
+
+@pytest.mark.parametrize("start_level", [9550.0, 9550.3, -3.25])
+def test_screen_is_whole_ticks_from_start_level(start_level):
+    """A screen quotes in ticks. Rounding is done in level-relative space, so
+    this holds for a start level that is not itself on a tick, and the
+    start_level invariance stays exact."""
+    cfg = GameConfig(start_level=start_level)
+    pub = generate(cfg, RngStreams(6)).public
+    ticks = (pub.screen - start_level) / cfg.tick_size
+    np.testing.assert_allclose(ticks, np.round(ticks), rtol=0, atol=1e-9)
+    assert np.ptp(ticks) >= 4  # it does move across ticks
+
+
+def test_rounded_screen_is_sticky_not_jittery():
+    """Why the AR(1) sits underneath the rounding. A persistent error moves
+    ~0.17bp per refresh against a 0.5bp tick, so the rounded reading stays on
+    its tick about three refreshes in four and then flips. Independent noise
+    moves ~0.7bp per refresh and the reading changes most of the time -- a
+    screen that flickers. Checked as the fraction of refreshes on which the
+    screen does not change, in both regimes.
+    """
+
+    def unchanged_fraction(cfg: GameConfig) -> float:
+        return float(np.mean([np.mean(np.diff(generate(cfg, RngStreams(s)).public.screen) == 0) for s in range(20)]))
+
+    sticky = unchanged_fraction(GameConfig())
+    jittery = unchanged_fraction(GameConfig(screen_noise_corr_s=0.0))
+    assert sticky > 0.55
+    assert jittery < 0.45
+    assert sticky > jittery + 0.15
 
 
 def test_screen_reading_is_piecewise_constant_with_known_age():
