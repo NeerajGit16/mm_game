@@ -40,11 +40,13 @@ def test_defaults_match_the_instrument_spec():
     assert cfg.trading_hours_per_day == 24.0
     assert cfg.trading_days_per_year == 252
     assert cfg.max_events == 2
+    assert (cfg.event_min_time_s, cfg.event_end_margin_s, cfg.event_min_gap_s) == (900.0, 600.0, 1800.0)
     assert (cfg.jump_size_min_bp, cfg.jump_size_max_bp) == (2.0, 4.0)
     assert cfg.drift_prob_agree == 0.60
     assert (cfg.drift_duration_min_s, cfg.drift_duration_max_s) == (600.0, 2400.0)
     assert (cfg.drift_magnitude_min_bp, cfg.drift_magnitude_max_bp) == (1.0, 2.0)
     assert cfg.screen_noise_bp == 0.5
+    assert cfg.screen_noise_corr_s == 90.0
     assert cfg.screen_refresh_s == 5.0
     assert cfg.markout_horizons_s == (10.0, 60.0, 300.0)
 
@@ -67,6 +69,24 @@ def test_derived_step_counts():
     cfg = GameConfig()
     assert cfg.screen_refresh_steps == 50
     assert cfg.markout_horizons_steps == (100, 600, 3000)
+    assert cfg.event_step_bounds == (9000, 66000)
+    assert cfg.event_min_gap_steps == 18000
+
+
+def test_event_calendar_must_be_placeable_for_every_seed():
+    """The fit check is done in steps, exactly as the calendar draw computes
+    it. A check in seconds that passed by a hair would let the draw fail on
+    the seeds that happened to pick two prints, and only those."""
+    window_s = 7200 - 900 - 600  # 5700
+    assert GameConfig(event_min_gap_s=window_s - 0.1).event_min_gap_steps == 56_999
+    with pytest.raises(ValueError, match="do not fit"):
+        GameConfig(event_min_gap_s=window_s)  # room for two prints is zero steps
+    assert GameConfig(max_events=1, event_min_gap_s=100_000).max_events == 1
+    assert GameConfig(max_events=0, event_min_time_s=7000).max_events == 0
+    with pytest.raises(ValueError, match="empty"):
+        GameConfig(event_min_time_s=7000)
+    # A print can never sit on step 0 whatever the lower bound says.
+    assert GameConfig(event_min_time_s=0).event_step_bounds[0] == 1
 
 
 def test_default_config_is_a_plain_default_instance():
@@ -132,6 +152,11 @@ def test_round_trips_through_json_exactly():
         ("trading_hours_per_day", 25),
         ("trading_days_per_year", 0),
         ("max_events", -1),
+        ("event_min_time_s", -1.0),
+        ("event_min_time_s", float("nan")),
+        ("event_end_margin_s", -1.0),
+        ("event_min_gap_s", -1.0),
+        ("event_min_gap_s", float("inf")),
         ("jump_size_min_bp", -1.0),
         ("jump_size_min_bp", 5.0),  # above the default max of 4
         ("drift_prob_agree", -0.1),
@@ -143,6 +168,8 @@ def test_round_trips_through_json_exactly():
         ("drift_magnitude_max_bp", 0.5),  # below the default min
         ("screen_noise_bp", -0.5),
         ("screen_noise_bp", float("nan")),
+        ("screen_noise_corr_s", -1.0),
+        ("screen_noise_corr_s", float("nan")),
         ("screen_refresh_s", 0),
         ("screen_refresh_s", 7201),
         ("screen_refresh_s", 0.13),  # not a whole number of 0.1 s steps
@@ -174,7 +201,9 @@ def test_dt_may_not_exceed_the_session():
 def test_dt_may_equal_the_session():
     """Degenerate but coherent: a single-step session. The screen and mark-out
     horizons have to fit the session too."""
-    cfg = GameConfig(session_length=10, dt=10, screen_refresh_s=10, markout_horizons_s=(10,))
+    cfg = GameConfig(
+        session_length=10, dt=10, screen_refresh_s=10, markout_horizons_s=(10,), max_events=0
+    )
     assert cfg.dt == 10
     assert cfg.n_steps == 1
     assert cfg.screen_refresh_steps == 1
@@ -209,11 +238,11 @@ def test_ragged_grid_rejected(session_length, dt):
     [
         (7200, 0.1, 72_000, {}),
         (3600, 0.3, 12_000, dict(screen_refresh_s=3.0, markout_horizons_s=(9.0, 60.0, 300.0))),
-        (1, 0.1, 10, dict(screen_refresh_s=0.1, markout_horizons_s=(0.5, 1.0))),
+        (1, 0.1, 10, dict(screen_refresh_s=0.1, markout_horizons_s=(0.5, 1.0), max_events=0)),
         (7200, 0.001, 7_200_000, {}),
         # 21 / 0.7 is 30.000000000000004 in float: a naive `.is_integer()`
         # rejects it, and a naive `int()` truncates it to 30 by luck only.
-        (21, 0.7, 30, dict(screen_refresh_s=7.0, markout_horizons_s=(7.0, 21.0))),
+        (21, 0.7, 30, dict(screen_refresh_s=7.0, markout_horizons_s=(7.0, 21.0), max_events=0)),
     ],
 )
 def test_divisible_grid_accepted(session_length, dt, n_steps, extra):

@@ -36,8 +36,10 @@ SRC_DIR = Path(mm_game.__file__).resolve().parent
 
 # A short session for the many-seed statistical tests. 6,000 steps instead of
 # 72,000 keeps a 600-seed loop around a second; the event and drift machinery
-# is exercised identically.
-SHORT = GameConfig(session_length=600)
+# is exercised identically. The event window is scaled down with it.
+SHORT = GameConfig(
+    session_length=600, event_min_time_s=60.0, event_end_margin_s=60.0, event_min_gap_s=120.0
+)
 FLOW_STREAMS = (
     Stream.FLOW_ARRIVAL,
     Stream.FLOW_SIZE,
@@ -290,7 +292,8 @@ def test_shapes_and_bounds():
     assert path.public.screen.shape == (n // cfg.screen_refresh_steps + 1,)
     assert path.event_steps.dtype.kind == "i"
     assert np.all(np.diff(path.event_steps) > 0)  # sorted, unique
-    assert np.all((path.event_steps >= 1) & (path.event_steps <= n))
+    lo, hi = cfg.event_step_bounds
+    assert np.all((path.event_steps >= lo) & (path.event_steps <= hi))
     assert path.jump_sizes.shape == path.event_steps.shape
     assert len(path.drift_windows) == path.event_steps.size
 
@@ -333,6 +336,32 @@ def test_event_count_is_uniform_on_zero_to_max():
     assert abs(counts.mean() - 1.0) < 0.15
 
 
+def test_calendar_respects_bounds_and_minimum_gap():
+    """No print before the player has a baseline, none in the last minutes
+    where every mark-out is truncated and there is no aftermath to trade, and
+    no two prints closer than a real calendar puts them. The whole window is
+    used: over 400 sessions the earliest and latest prints land within a few
+    minutes of the bounds, so the bounds are binding rather than decorative.
+    """
+    cfg = GameConfig()
+    lo, hi = cfg.event_step_bounds
+    gap = cfg.event_min_gap_steps
+    steps, gaps = [], []
+    for s in range(400):
+        e = generate(cfg, RngStreams(s)).event_steps
+        steps.extend(e.tolist())
+        gaps.extend(np.diff(e).tolist())
+    steps, gaps = np.array(steps), np.array(gaps)
+    assert steps.min() >= lo and steps.max() <= hi
+    assert steps.min() < lo + 3000 and steps.max() > hi - 3000  # within 5 min of each bound
+    assert gaps.size > 80 and gaps.min() > gap
+    assert gaps.min() < gap + 6000  # the gap binds within 10 min at least once
+
+    # Step 0 is never a print even when the lower bound allows t=0.
+    zero_ok = GameConfig(event_min_time_s=0.0)
+    assert min(generate(zero_ok, RngStreams(s)).event_steps.min() for s in range(50) if generate(zero_ok, RngStreams(s)).event_steps.size) >= 1
+
+
 def test_jump_sizes_are_symmetric_and_in_range():
     """Symmetry is the design invariant, not cosmetics: an asymmetric print
     distribution is a free edge. Over ~600 prints the sign mean has SE 0.04."""
@@ -358,40 +387,43 @@ def test_drift_agrees_with_the_print_sixty_percent_of_the_time():
     assert abs(np.mean(directions)) < 0.15
 
 
-def test_drift_windows_fit_before_their_print_and_shorten_when_early():
-    """The window lies in [0, event_step]; a print too early for the drawn
-    duration gets a window from step 0 at the same per-step rate.
+def test_drift_windows_end_at_their_print_and_shorten_when_early():
+    """Every window ends exactly at its print: a drift that finishes and
+    flat-lines into the release is not pre-positioning. Duration carries the
+    randomness, so starts spread over the 10-40 minute range and there is no
+    lead time to learn. A print too early for the drawn duration gets a window
+    from step 0 at the same per-step rate.
 
     The drawn duration is not observable from outside, so the invariants are
     stated on what is: the per-step rate is always within the range the config
     implies, because shortening preserves it; a window that does not start at
-    step 0 was never shortened, so its length and total are in range; and a
-    window shorter than the minimum duration must be a shortened one, ending
-    exactly at its print.
+    step 0 was never shortened, so its length and total are in range.
     """
     cfg = GameConfig()
     min_dur = round(cfg.drift_duration_min_s / cfg.dt)
     max_dur = round(cfg.drift_duration_max_s / cfg.dt)
     rate_lo = cfg.drift_magnitude_min_bp / max_dur
     rate_hi = cfg.drift_magnitude_max_bp / min_dur
-    seen_full, seen_short = False, False
-    for s in range(60):
+    full_lengths, seen_short = [], False
+    for s in range(150):
         path = generate(cfg, RngStreams(s))
         for w, e in zip(path.drift_windows, path.event_steps):
-            assert 0 <= w.start_step < w.end_step <= e
+            assert w.end_step == e
+            assert 0 <= w.start_step < w.end_step
             length = w.end_step - w.start_step
             rate = abs(w.total_bp) / length
             assert rate_lo * (1 - 1e-9) <= rate <= rate_hi * (1 + 1e-9)
             assert abs(w.total_bp) <= cfg.drift_magnitude_max_bp
             if w.start_step > 0:
-                seen_full = True
+                full_lengths.append(length)
                 assert min_dur <= length <= max_dur
                 assert cfg.drift_magnitude_min_bp <= abs(w.total_bp) <= cfg.drift_magnitude_max_bp
-            if length < min_dur:
+            else:
                 seen_short = True
-                assert w.start_step == 0 and w.end_step == e
-                assert abs(w.total_bp) < cfg.drift_magnitude_min_bp
-    assert seen_full and seen_short
+                assert length == e
+    assert seen_short and len(full_lengths) > 60
+    # No fixed lead time: full windows span the range, not one length.
+    assert min(full_lengths) < min_dur + 3000 and max(full_lengths) > max_dur - 3000
 
 
 def test_drift_ramp_is_linear_and_overlaps_add():
@@ -445,18 +477,66 @@ def test_jumps_within_uses_a_half_open_window_and_clamps():
 # --------------------------------------------------------------------------
 
 
-def test_screen_is_truth_plus_noise_at_each_refresh():
-    """Noise stdev matches config (SE over 1,441 readings is ~1.9%, so 10% is
-    generous) and the screen is exactly the truth when noise is zero."""
-    cfg = GameConfig()
-    path = generate(cfg, RngStreams(6))
+def screen_residuals(cfg: GameConfig, seeds: range) -> list[np.ndarray]:
     r = cfg.screen_refresh_steps
-    residual = path.public.screen - path.values[::r]
-    assert math.isclose(residual.std(ddof=1), cfg.screen_noise_bp, rel_tol=0.10)
-    assert abs(residual.mean()) < 0.1
+    out = []
+    for s in seeds:
+        p = generate(cfg, RngStreams(s))
+        out.append(p.public.screen - p.values[::r])
+    return out
+
+
+def lag1_autocorr(x: np.ndarray) -> float:
+    return float(np.corrcoef(x[:-1], x[1:])[0, 1])
+
+
+def test_screen_error_is_persistent_and_bounded():
+    """The screen error is a stationary AR(1): stdev equals screen_noise_bp at
+    every refresh, and readings 5 s apart correlate as exp(-5/90) = 0.946.
+
+    Pooled over 20 sessions because the persistence makes ~29,000 readings
+    worth only ~800 independent ones; 10% on the stdev is then ~3 SE. Starting
+    from the stationary distribution is checked through the pooled stdev of
+    the first reading alone: if the error started at zero, the opening
+    minutes of every session would be the most accurate ones.
+    """
+    cfg = GameConfig()
+    phi = math.exp(-cfg.screen_refresh_s / cfg.screen_noise_corr_s)
+    resid = screen_residuals(cfg, range(20))
+    pooled = np.concatenate(resid)
+    assert math.isclose(pooled.std(ddof=1), cfg.screen_noise_bp, rel_tol=0.10)
+    assert abs(pooled.mean()) < 0.1
+    assert abs(np.mean([lag1_autocorr(x) for x in resid]) - phi) < 0.03
+    first = np.array([x[0] for x in screen_residuals(cfg, range(200))])
+    assert 0.35 < first.std(ddof=1) < 0.65
 
     clean = generate(GameConfig(screen_noise_bp=0.0), RngStreams(6))
-    np.testing.assert_array_equal(clean.public.screen, clean.values[::r])
+    np.testing.assert_array_equal(clean.public.screen, clean.values[:: cfg.screen_refresh_steps])
+
+
+def test_screen_error_cannot_be_averaged_away():
+    """The reason for persistence. With independent noise a one-minute average
+    of 12 readings has stdev 0.29 of a tick and pins fair value to a third of a
+    tick; the coarse anchor is defeated in a minute of patience. With a 90 s
+    correlation time the same average has stdev 0.90 of a tick -- worth 1.2
+    readings, not 12. A correlation time of 0 recovers the white screen, and
+    both regimes are checked so the parameter is proven to do something.
+    """
+    r = GameConfig().screen_refresh_steps
+    n_block = round(60.0 / GameConfig().screen_refresh_s)  # 12 readings per minute
+
+    def minute_average_std(cfg: GameConfig) -> float:
+        blocks = []
+        for x in screen_residuals(cfg, range(20)):
+            usable = (len(x) // n_block) * n_block
+            blocks.append(x[:usable].reshape(-1, n_block).mean(axis=1))
+        return float(np.concatenate(blocks).std(ddof=1))
+
+    persistent = minute_average_std(GameConfig())
+    white = minute_average_std(GameConfig(screen_noise_corr_s=0.0))
+    assert 0.36 < persistent < 0.54  # expected 0.450bp
+    assert 0.10 < white < 0.19  # expected 0.144bp
+    assert abs(np.mean([lag1_autocorr(x) for x in screen_residuals(GameConfig(screen_noise_corr_s=0.0), range(20))])) < 0.05
 
 
 def test_screen_reading_is_piecewise_constant_with_known_age():

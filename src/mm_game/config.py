@@ -78,9 +78,17 @@ class GameConfig:
     trading_days_per_year: int = 252
 
     # -- Scheduled events ------------------------------------------------------
-    # 0..max_events data prints per session, count uniform, times uniform over
-    # the session. Timing is public; the outcome is hidden.
+    # 0..max_events data prints per session, count uniform. Timing is public;
+    # the outcome is hidden. Times are uniform over the window
+    # [event_min_time_s, session_length - event_end_margin_s] subject to a
+    # minimum gap between prints: no print before the player has a baseline
+    # and a full minimum-length drift can fit, none so late that there is no
+    # aftermath to trade and the mark-outs are all truncated, and no two
+    # prints closer than a real calendar puts them.
     max_events: int = 2
+    event_min_time_s: float = 15 * 60.0
+    event_end_margin_s: float = 10 * 60.0
+    event_min_gap_s: float = 30 * 60.0
     # Print outcome: sign symmetric, magnitude uniform on [min, max] bp. Below
     # ~2bp a jump is indistinguishable from diffusion noise.
     jump_size_min_bp: float = 2.0
@@ -92,19 +100,26 @@ class GameConfig:
     # is a 0.20 correlation. Must stay meaningfully below 1 or "follow the
     # drift" becomes a free edge.
     drift_prob_agree: float = 0.60
-    # Duration is drawn first, then the window is placed uniformly in whatever
-    # room exists before the print. Magnitude is the total move over the
-    # window; against ~0.65bp of diffusion noise over 20 minutes it is visible
-    # but not free.
+    # The window ends at the print and its duration carries the randomness, so
+    # the start is somewhere 10-40 minutes out and there is no fixed lead time
+    # to learn. Magnitude is the total move over the window; against ~0.65bp
+    # of diffusion noise over 20 minutes it is visible but not free.
     drift_duration_min_s: float = 10 * 60.0
     drift_duration_max_s: float = 40 * 60.0
     drift_magnitude_min_bp: float = 1.0
     drift_magnitude_max_bp: float = 2.0
 
     # -- Screen ----------------------------------------------------------------
-    # Fair value plus observation noise (stdev, bp -- about one tick), sampled
-    # every screen_refresh_s. A coarse anchor, not something to quote off.
+    # Fair value plus a persistent observation error, sampled every
+    # screen_refresh_s. The error is AR(1) with stationary stdev
+    # screen_noise_bp (about one tick) and correlation time
+    # screen_noise_corr_s: locally unaverageable -- a minute of readings is
+    # worth about one reading -- and globally bounded, since the stationary
+    # stdev never grows. Independent per-refresh noise was tried first and a
+    # minute of averaging pinned fair value to a third of a tick; 0 here
+    # recovers that white-noise screen for comparison.
     screen_noise_bp: float = 0.5
+    screen_noise_corr_s: float = 90.0
     screen_refresh_s: float = 5.0
 
     # -- Mark-out horizons -----------------------------------------------------
@@ -165,6 +180,35 @@ class GameConfig:
         # Events.
         if not self.max_events >= 0:
             raise ValueError(f"max_events must be non-negative, got {self.max_events}")
+        if not (math.isfinite(self.event_min_time_s) and self.event_min_time_s >= 0):
+            raise ValueError(
+                f"event_min_time_s must be finite and non-negative, got {self.event_min_time_s}"
+            )
+        if not (math.isfinite(self.event_end_margin_s) and self.event_end_margin_s >= 0):
+            raise ValueError(
+                f"event_end_margin_s must be finite and non-negative, got {self.event_end_margin_s}"
+            )
+        if not (math.isfinite(self.event_min_gap_s) and self.event_min_gap_s >= 0):
+            raise ValueError(
+                f"event_min_gap_s must be finite and non-negative, got {self.event_min_gap_s}"
+            )
+        if self.max_events > 0:
+            lo, hi = self.event_step_bounds
+            if hi < lo:
+                raise ValueError(
+                    "event window is empty: session_length - event_end_margin_s - "
+                    f"event_min_time_s leaves steps [{lo}, {hi}]"
+                )
+            # Every count up to max_events must be placeable with the minimum
+            # gap, in steps, exactly as the calendar draw computes it -- or the
+            # draw would fail for some seeds and not others.
+            need = self.max_events - 1
+            if hi - lo - need * self.event_min_gap_steps < need:
+                raise ValueError(
+                    f"{self.max_events} events with a {self.event_min_gap_s}s minimum "
+                    f"gap do not fit in the event window [{self.event_min_time_s}s, "
+                    f"{self.session_length - self.event_end_margin_s}s]"
+                )
         if not 0 <= self.jump_size_min_bp <= self.jump_size_max_bp:
             raise ValueError(
                 "jump sizes must satisfy 0 <= min <= max, got "
@@ -191,6 +235,10 @@ class GameConfig:
         if not (math.isfinite(self.screen_noise_bp) and self.screen_noise_bp >= 0):
             raise ValueError(
                 f"screen_noise_bp must be finite and non-negative, got {self.screen_noise_bp}"
+            )
+        if not (math.isfinite(self.screen_noise_corr_s) and self.screen_noise_corr_s >= 0):
+            raise ValueError(
+                f"screen_noise_corr_s must be finite and non-negative, got {self.screen_noise_corr_s}"
             )
         if not 0 < self.screen_refresh_s <= self.session_length:
             raise ValueError(
@@ -228,6 +276,18 @@ class GameConfig:
     def markout_horizons_steps(self) -> tuple[int, ...]:
         """Mark-out horizons in grid steps, validated whole, config order."""
         return tuple(round(h / self.dt) for h in self.markout_horizons_s)
+
+    @property
+    def event_step_bounds(self) -> tuple[int, int]:
+        """Inclusive step range a print may land on. Never step 0: the jump
+        lands on the increment into its step, and step 0 has none."""
+        lo = max(1, round(self.event_min_time_s / self.dt))
+        hi = self.n_steps - round(self.event_end_margin_s / self.dt)
+        return lo, hi
+
+    @property
+    def event_min_gap_steps(self) -> int:
+        return round(self.event_min_gap_s / self.dt)
 
 
 DEFAULT_CONFIG = GameConfig()

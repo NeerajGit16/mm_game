@@ -9,10 +9,12 @@ arrived.
 
 The process is arithmetic Brownian motion in basis-point units with zero drift
 and no reversion, plus 0..2 scheduled prints per session. Each print is a
-symmetric jump the market pre-positions for: a drift regime of random timing
-and magnitude runs somewhere before it, agreeing with the print's sign only
-60% of the time. Nothing here is exploitable without reading flow: no
-reversion level to lean on, no constant drift, no asymmetry in the jumps.
+symmetric jump the market pre-positions for: a drift regime of random duration
+and magnitude runs into it, agreeing with the print's sign only 60% of the
+time. The public screen is the truth plus a persistent observation error that
+a minute of averaging cannot remove. Nothing here is exploitable without
+reading flow: no reversion level to lean on, no constant drift, no asymmetry
+in the jumps, no screen you can average your way to the truth from.
 
 This module is a producer of data, not a service. ``generate`` builds a
 ``FairValuePath`` once; the engine holds it and hands each participant the
@@ -272,13 +274,28 @@ class FairValuePath:
 
 
 def _draw_calendar(config: GameConfig, gen: np.random.Generator) -> np.ndarray:
-    """How many prints and when. Uniform count on 0..max_events, times uniform
-    over [1, n_steps] without replacement, sorted."""
+    """How many prints and when.
+
+    Count is uniform on 0..max_events. Times are uniform over the event window
+    subject to the minimum gap: draw distinct steps from the window shrunk by
+    the total gap, sort, then push each later print out by its share of the
+    gaps. That is the standard construction and it is exactly uniform over
+    the constrained set. Step 0 is never a print: the jump would land on the
+    increment before it, which does not exist.
+    """
     count = int(gen.integers(0, config.max_events + 1))
     if count == 0:
         return np.empty(0, dtype=np.int64)
-    steps = gen.choice(config.n_steps, size=count, replace=False) + 1
-    return np.sort(steps.astype(np.int64))
+    lo, hi = config.event_step_bounds
+    gap = config.event_min_gap_steps
+    room = hi - lo - (count - 1) * gap
+    if room + 1 < count:
+        raise ValueError(
+            f"cannot place {count} prints with a {gap}-step gap in steps [{lo}, {hi}]"
+        )
+    picks = np.sort(gen.choice(room + 1, size=count, replace=False))
+    steps = lo + picks + np.arange(count) * gap
+    return steps.astype(np.int64)
 
 
 def _draw_jump(config: GameConfig, gen: np.random.Generator) -> tuple[float, float]:
@@ -294,15 +311,17 @@ def _draw_jump(config: GameConfig, gen: np.random.Generator) -> tuple[float, flo
 def _draw_drift(
     config: GameConfig, gen: np.random.Generator, event_index: int, event_step: int, jump_sign: float
 ) -> DriftWindow:
-    """The pre-positioning regime before one print.
+    """The pre-positioning regime running into one print.
 
-    Draw order is direction, duration, magnitude, start. Duration comes before
-    placement so the window is placed in whatever room exists; drawing the
-    start first can leave no room. If the print is too early for the drawn
-    duration the window is shortened to fit, keeping the per-step rate rather
-    than the total: a 20-minute 1.5bp drift squeezed into 3 minutes at full
-    magnitude would be a signal no market gives, and a print in the first
-    seconds gets a negligible drift, which is the "skip" end of the rule.
+    The window ends at the print. A drift that finishes and flat-lines for ten
+    minutes before the release is not pre-positioning. Duration carries the
+    randomness, so the start is still somewhere 10-40 minutes out and there is
+    no fixed lead time to learn. Draw order is direction, duration, magnitude.
+    If the print is too early for the drawn duration the window is shortened
+    to start at step 0, keeping the per-step rate rather than the total: a
+    20-minute 1.5bp drift squeezed into 3 minutes at full magnitude would be a
+    signal no market gives, and a print in the first seconds gets a negligible
+    drift, which is the "skip" end of the rule.
     """
     agrees = gen.random() < config.drift_prob_agree
     direction = jump_sign if agrees else -jump_sign
@@ -310,16 +329,12 @@ def _draw_drift(
     magnitude = float(gen.uniform(config.drift_magnitude_min_bp, config.drift_magnitude_max_bp))
     duration_steps = max(1, round(duration_s / config.dt))
     if duration_steps > event_step:
-        rate = magnitude / duration_steps
+        magnitude *= event_step / duration_steps
         duration_steps = event_step
-        magnitude = rate * duration_steps
-        start = 0
-    else:
-        start = int(gen.integers(0, event_step - duration_steps + 1))
     return DriftWindow(
         event_index=event_index,
-        start_step=start,
-        end_step=start + duration_steps,
+        start_step=event_step - duration_steps,
+        end_step=event_step,
         total_bp=direction * magnitude,
     )
 
@@ -338,6 +353,33 @@ def _jump_increments(n_steps: int, event_steps: np.ndarray, sizes: np.ndarray) -
     inc = np.zeros(n_steps)
     np.add.at(inc, event_steps - 1, sizes)
     return inc
+
+
+def _screen_error(config: GameConfig, z: np.ndarray) -> np.ndarray:
+    """Persistent observation error at each refresh: a stationary AR(1).
+
+    ``e[0] ~ N(0, s^2)`` and ``e[k] = phi * e[k-1] + s * sqrt(1 - phi^2) * z[k]``
+    with ``phi = exp(-refresh / corr_time)``, so every reading has stdev ``s``
+    and readings ``t`` apart correlate as ``exp(-t / corr_time)``. Starting
+    from the stationary distribution matters: starting at zero would make the
+    first minutes of every session the most accurate ones.
+
+    The point, against independent noise at the same stdev: the variance of
+    an N-reading average is ``s^2/N * (1 + 2 * sum_k (1 - k/N) phi^k)``. At
+    5 s refresh and a 90 s correlation time, a one-minute average of twelve
+    readings has stdev 0.90 s rather than 0.29 s -- worth 1.2 independent
+    readings, not twelve. Five minutes of averaging gets to 0.65 s, by which
+    time the truth has moved further than that. Averaging does not get you
+    the truth.
+    """
+    s = config.screen_noise_bp
+    phi = math.exp(-config.screen_refresh_s / config.screen_noise_corr_s) if config.screen_noise_corr_s > 0 else 0.0
+    innovation = s * math.sqrt(1.0 - phi * phi)
+    err = np.empty(len(z))
+    err[0] = s * z[0]
+    for k in range(1, len(z)):
+        err[k] = phi * err[k - 1] + innovation * z[k]
+    return err
 
 
 def _cumulative(increments: np.ndarray) -> np.ndarray:
@@ -379,13 +421,14 @@ def generate(config: GameConfig, rng: RngStreams) -> FairValuePath:
     relative = diffusion + drift + jumps
     values = config.start_level + relative
 
-    # Screen: the truth at each refresh step plus observation noise, from the
-    # instrument's own observation generator. Drawn up front like everything
-    # else.
+    # Screen: the truth at each refresh step plus a persistent observation
+    # error, from the instrument's own observation generator. Drawn up front
+    # like everything else; one standard normal per refresh whatever the
+    # correlation time, so the draw count is a function of config alone.
     r = config.screen_refresh_steps
     obs_steps = np.arange(n // r + 1) * r
-    noise = rng.substream(Stream.SCREEN, INSTRUMENT_ORDINAL).standard_normal(len(obs_steps))
-    screen = values[obs_steps] + config.screen_noise_bp * noise
+    z = rng.substream(Stream.SCREEN, INSTRUMENT_ORDINAL).standard_normal(len(obs_steps))
+    screen = values[obs_steps] + _screen_error(config, z)
 
     event_steps = _freeze(event_steps)
     public = PublicView(
