@@ -18,19 +18,20 @@ caused by your position, never by a reshuffled market.
 
 The competitors
     Three dealers share one model. A dealer's mid is the truth, plus a share
-    of the screen's error -- dealers watch the same screen, so when it reads a
-    tick rich the street leans rich -- plus the dealer's own persistent error.
+    of the screen's error -- dealers watch the same screen, so when it reads
+    rich the street leans rich -- plus the dealer's own persistent error.
     Both error components persist for minutes, so cover calibrates you but
     cannot be averaged down to the truth. Each quotes its mid plus or minus a
-    half-spread rounded to the nearest tick, widening for size and around
+    half-spread, rounded to the nearest tick, widening for size and around
     prints. That is public information only: a dealer never knows who is
     informed, and never adapts during a session, because whether a dealer was
     picked off depends on whether you won the trade.
 
 The client
     Every RFQ carries a limit: the worst price the client accepts on their
-    side. Uninformed limits sit on the screen plus a tolerance of about a
-    tick, occasionally three. Informed limits reflect the client's view of the
+    side. Uninformed limits sit on the screen plus a tolerance of about
+    three-quarters of a bp, occasionally three times that. Informed limits
+    reflect the client's view of the
     print: they pay up to the screen plus about half their expected move. The
     ranges overlap, so a fill at a wide price is evidence, never proof. The
     client trades with the best price inside the limit, or walks.
@@ -181,18 +182,17 @@ def _client_limit(
     """The worst price the client accepts, on their side.
 
     Uninformed: the screen plus a lognormal tolerance around
-    ``client_tolerance_ticks``, growing mildly with size. Informed: at least
+    ``client_tolerance_bp``, growing mildly with size. Informed: at least
     that, and up to the screen plus ``informed_edge_given_up`` of the move
     they expect from their view -- (2q - 1) * |signal| for a view right with
     probability q. The tolerance draw is shared by both, so the two ranges
     overlap and turning a client informed only ever widens their limit.
     """
-    tolerance_ticks = (
-        config.client_tolerance_ticks
+    distance = (
+        config.client_tolerance_bp
         * math.exp(config.client_tolerance_log_sd * z_tolerance)
         * (1.0 + config.client_tolerance_size_growth * rfq.size / 100.0)
     )
-    distance = tolerance_ticks * config.tick_size
     if rfq.informed and rfq.signal_bp is not None:
         expected_move = (2.0 * config.informed_accuracy - 1.0) * abs(rfq.signal_bp)
         distance = max(distance, config.informed_edge_given_up * expected_move)
@@ -236,7 +236,7 @@ def pregenerate(
         screen_mid = float(public.screen[showing])
         shared = config.competitor_screen_weight * float(path.screen_error[showing])
         seconds = public.seconds_to_nearest_print(t)
-        half_spread = config.competitor_half_spread_ticks_at(rfq.size, seconds) * tick
+        half_spread = config.competitor_half_spread_bp_at(rfq.size, seconds)
 
         mids = path.values[t] + shared + dealer_err[:, t // r]
         bids = np.rint((mids - half_spread - config.start_level) / tick).astype(int)

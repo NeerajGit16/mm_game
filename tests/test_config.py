@@ -28,11 +28,11 @@ SRC_DIR = Path(mm_game.__file__).resolve().parent
 
 
 def test_defaults_match_the_instrument_spec():
-    """One futures contract in basis-point units: half a bp per tick, $25 a
-    tick, so $50 per bp per lot. 9550 displays as 95.50."""
+    """One futures contract in basis-point units: a quarter of a bp per tick,
+    $12.50 a tick, so $50 per bp per lot. 9550 displays as 95.50."""
     cfg = GameConfig()
-    assert cfg.tick_size == 0.5
-    assert cfg.tick_value == 25.0
+    assert cfg.tick_size == 0.25
+    assert cfg.tick_value == 12.5
     assert cfg.lot_size == 1
     assert cfg.bp_per_point == 100.0
     assert cfg.start_level == 9550.0
@@ -65,12 +65,12 @@ def test_defaults_match_the_instrument_spec():
     assert (cfg.informed_size_ref_bp, cfg.informed_size_factor_min, cfg.informed_size_factor_max) == (1.5, 1.0, 3.0)
     assert (cfg.crowd_drift_tilt, cfg.one_way_prob_uninformed, cfg.one_way_prob_informed) == (0.60, 0.05, 0.10)
     assert cfg.n_competitors == 3
-    assert (cfg.competitor_half_spread_ticks, cfg.competitor_size_widen_ticks) == (1.0, 1.0)
+    assert (cfg.competitor_half_spread_bp, cfg.competitor_size_widen_bp) == (0.5, 0.5)
     assert (cfg.competitor_print_widen, cfg.competitor_print_window_s) == (1.0, 120.0)
     assert (cfg.competitor_screen_weight, cfg.competitor_error_bp, cfg.competitor_error_corr_s) == (0.75, 0.15, 120.0)
-    assert (cfg.client_tolerance_ticks, cfg.client_tolerance_log_sd, cfg.client_tolerance_size_growth) == (1.5, 0.4, 0.5)
+    assert (cfg.client_tolerance_bp, cfg.client_tolerance_log_sd, cfg.client_tolerance_size_growth) == (0.75, 0.4, 0.5)
     assert cfg.informed_edge_given_up == 0.5
-    assert (cfg.hedge_cost_ticks, cfg.hedge_impact_ticks, cfg.hedge_margin_ticks) == (2.0, 1.0, 0.5)
+    assert (cfg.hedge_cost_bp, cfg.hedge_impact_bp, cfg.hedge_margin_bp) == (1.0, 0.5, 0.25)
     assert (cfg.hedge_print_widen, cfg.hedge_print_window_s) == (1.0, 120.0)
     assert (cfg.close_liquidation_multiplier, cfg.position_limit_lots) == (1.5, 200)
 
@@ -134,24 +134,54 @@ def test_default_category_probabilities_are_strictly_between_zero_and_one():
     assert cfg.informed_accuracy > cfg.drift_prob_agree + 0.1
 
 
-def test_tick_is_half_a_basis_point_and_fifty_dollars_per_bp():
+def test_tick_is_a_quarter_basis_point_and_fifty_dollars_per_bp():
     """The old (0.005, 25.0) pair mixed a price increment from one instrument
     with a per-bp figure from another and made every P&L 2x hot. Pin the
-    relation, not just the numbers."""
+    relation, not just the numbers, and pin that money goes through the one
+    conversion property."""
     cfg = GameConfig()
-    dollars_per_bp_per_lot = cfg.tick_value / cfg.tick_size
-    assert dollars_per_bp_per_lot == 50.0
+    assert cfg.tick_value / cfg.tick_size == 50.0
+    assert cfg.dollars_per_bp_per_lot == 50.0
+
+
+def test_no_economic_parameter_is_denominated_in_ticks():
+    """Every spread, tolerance, cost and margin is in bp; the tick is only the
+    price grid. Catches a parameter reintroduced in ticks, which a tick change
+    would then silently rescale. The field name is the unit contract, so it is
+    checked structurally: the only tick-named fields are the grid's own."""
+    names = {f.name for f in dataclasses.fields(GameConfig)}
+    assert {n for n in names if "tick" in n} == {"tick_size", "tick_value"}
+
+
+def test_economics_do_not_move_with_the_tick():
+    """Halving the tick (keeping $50/bp/lot) leaves every economic function
+    identical in bp: dealer half-spreads, hedge cost and dollars per bp. The
+    one exception is the furthest a rounded dealer quote can sit from its
+    mid, which carries half a tick of rounding by definition -- so it moves by
+    exactly the change in half a tick. Catches a bp parameter multiplied by
+    the tick somewhere in the spread or cost functions."""
+    fine, coarse = GameConfig(), GameConfig(tick_size=0.5, tick_value=25.0)
+    assert fine.dollars_per_bp_per_lot == coarse.dollars_per_bp_per_lot
+    for size in (1, 10, 55, 100):
+        for seconds in (0.0, 30.0, 119.0, 600.0, math.inf):
+            assert fine.competitor_half_spread_bp_at(size, seconds) == coarse.competitor_half_spread_bp_at(size, seconds)
+            assert fine.hedge_cost_bp_at(size, seconds) == coarse.hedge_cost_bp_at(size, seconds)
+            assert math.isclose(
+                coarse.competitor_max_quote_distance_bp(size, seconds)
+                - fine.competitor_max_quote_distance_bp(size, seconds),
+                (coarse.tick_size - fine.tick_size) / 2,
+            )
 
 
 def test_display_convention_is_pinned():
     """The model works in bp; a screen shows points. 9550bp is 95.50 and a
-    half-bp tick is 0.005, three decimals. Pinned so the conversion is never
-    reinvented from memory at a display site -- the tick-size bug was a
+    quarter-bp tick is 0.0025, four decimals. Pinned so the conversion is
+    never reinvented from memory at a display site -- the tick-size bug was a
     convention living in two places."""
     cfg = GameConfig()
     assert cfg.start_level / cfg.bp_per_point == 95.5
-    assert cfg.tick_size / cfg.bp_per_point == 0.005
-    assert (cfg.start_level + 7 * cfg.tick_size) / cfg.bp_per_point == 95.535
+    assert cfg.tick_size / cfg.bp_per_point == 0.0025
+    assert (cfg.start_level + 7 * cfg.tick_size) / cfg.bp_per_point == 95.5175
 
 
 def test_default_grid_is_72000_steps():
@@ -299,17 +329,17 @@ def test_round_trips_through_json_exactly():
         ("one_way_prob_uninformed", -0.01),
         ("one_way_prob_informed", float("nan")),
         ("n_competitors", 0),
-        ("competitor_half_spread_ticks", 0.4),  # a rounded bid could sit at or above the mid
-        ("competitor_size_widen_ticks", -1.0),
+        ("competitor_half_spread_bp", 0.1),  # under half a tick: a rounded bid could reach the mid
+        ("competitor_size_widen_bp", -1.0),
         ("competitor_screen_weight", 1.5),
         ("competitor_error_bp", -0.1),
         ("competitor_error_corr_s", float("nan")),
-        ("client_tolerance_ticks", 0.0),
+        ("client_tolerance_bp", 0.0),
         ("client_tolerance_log_sd", -0.1),
         ("informed_edge_given_up", 1.5),
-        ("hedge_cost_ticks", 0.0),
-        ("hedge_margin_ticks", -0.1),
-        ("hedge_cost_ticks", 1.5),  # breaches the margin over the competitor quotes
+        ("hedge_cost_bp", 0.0),
+        ("hedge_margin_bp", -0.1),
+        ("hedge_cost_bp", 0.75),  # breaches the margin over the competitor quotes
         ("close_liquidation_multiplier", 0.9),  # holding to the bell would be cheaper than hedging
         ("position_limit_lots", 50),  # one ticket from flat could breach it
     ],

@@ -15,8 +15,8 @@ would be quote, fill, hedge instantly -- riskless and mechanical, flat before
 every print, adverse selection gone. Config validation proves the cost
 exceeds the furthest a competitor quote can sit from its own mid by a margin,
 at every ticket size and every distance from a print. Hedging is then a
-decision: pay two ticks to get out of a fill you think was informed, ahead of
-a print that could cost you six.
+decision: pay a basis point to get out of a fill you think was informed,
+ahead of a print that could cost you three.
 
 Both functions take only the public view. They are structurally unable to read
 the truth, and they draw no randomness: the same request at the same step
@@ -39,14 +39,14 @@ class HedgeFill:
     requested: int
     quantity: int
     price: float | None  # average price per lot; None if nothing filled
-    cost_ticks_per_lot: float
+    cost_bp_per_lot: float
     clipped: bool  # the position limit cut the request
 
     @property
     def cost_bp(self) -> float:
-        """Total cost against the screen, in bp-lots. Times tick value over
-        tick size for dollars."""
-        return abs(self.quantity) * self.cost_ticks_per_lot
+        """Total cost against the screen, in bp-lots. Times
+        ``dollars_per_bp_per_lot`` for dollars."""
+        return abs(self.quantity) * self.cost_bp_per_lot
 
     def to_record(self) -> dict[str, object]:
         return {
@@ -54,7 +54,7 @@ class HedgeFill:
             "requested": self.requested,
             "quantity": self.quantity,
             "price": self.price,
-            "cost_ticks_per_lot": self.cost_ticks_per_lot,
+            "cost_bp_per_lot": self.cost_bp_per_lot,
             "clipped": self.clipped,
         }
 
@@ -65,10 +65,10 @@ def _execute(
     if quantity == 0:
         return HedgeFill(step, requested, 0, None, 0.0, requested != 0)
     seconds = public.seconds_to_nearest_print(step)
-    cost_ticks = config.hedge_cost_ticks_at(abs(quantity), seconds) * multiplier
+    cost_bp = config.hedge_cost_bp_at(abs(quantity), seconds) * multiplier
     direction = 1 if quantity > 0 else -1
-    price = public.screen_at(step) + direction * cost_ticks * config.tick_size
-    return HedgeFill(step, requested, quantity, price, cost_ticks, quantity != requested)
+    price = public.screen_at(step) + direction * cost_bp
+    return HedgeFill(step, requested, quantity, price, cost_bp, quantity != requested)
 
 
 def hedge(step: int, quantity: int, position: int, public: PublicView, config: GameConfig) -> HedgeFill:

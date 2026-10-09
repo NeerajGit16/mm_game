@@ -49,14 +49,20 @@ def _whole_steps(seconds: float, dt: float, what: str) -> int:
 class GameConfig:
     # -- Instrument -----------------------------------------------------------
     # One futures contract priced in basis-point units: one price unit is 1bp
-    # of yield equivalent, higher is better for a long. Half a basis point per
-    # tick, $25 per tick, so $50 per basis point per lot.
-    tick_size: float = 0.5
-    tick_value: float = 25.0
+    # of yield equivalent, higher is better for a long. A quarter of a basis
+    # point per tick, as front SOFR futures trade; $12.50 a tick, so $50 per
+    # basis point per lot.
+    #
+    # The tick is the price grid and nothing else. Every economic parameter
+    # below -- spreads, tolerances, costs, margins -- is in bp, so a change of
+    # tick moves where prices may sit, never what anything costs. Money is
+    # dollars_per_bp_per_lot times bp-lots, never ticks times tick value.
+    tick_size: float = 0.25
+    tick_value: float = 12.5
     lot_size: int = 1
-    # Display convention: one price point is 100bp, so a level of 9553.5 shows
-    # as 95.535 and a half-bp tick as 0.005. Recorded here so the conversion
-    # lives in one place; the model itself never uses it. Display is UI work.
+    # Display convention: one price point is 100bp, so a level of 9551.75
+    # shows as 95.5175 and a quarter-bp tick as 0.0025. Recorded here so the
+    # conversion lives in one place; the model never uses it. Display is UI work.
     bp_per_point: float = 100.0
     # Cosmetic: nothing in the model depends on the level (arithmetic process,
     # no reversion, absolute tick size). 9550 displays as 95.50.
@@ -118,12 +124,11 @@ class GameConfig:
     # -- Screen ----------------------------------------------------------------
     # Fair value plus a persistent observation error, sampled every
     # screen_refresh_s. The error is AR(1) with stationary stdev
-    # screen_noise_bp (about one tick) and correlation time
-    # screen_noise_corr_s: locally unaverageable -- a minute of readings is
-    # worth about one reading -- and globally bounded, since the stationary
-    # stdev never grows. Independent per-refresh noise was tried first and a
-    # minute of averaging pinned fair value to a third of a tick; 0 here
-    # recovers that white-noise screen for comparison.
+    # screen_noise_bp and correlation time screen_noise_corr_s: locally
+    # unaverageable -- a minute of readings is worth about one reading -- and
+    # globally bounded, since the stationary stdev never grows. Independent
+    # per-refresh noise was tried first and a minute of averaging pinned fair
+    # value to 0.14bp; 0 here recovers that white-noise screen for comparison.
     screen_noise_bp: float = 0.5
     screen_noise_corr_s: float = 90.0
     screen_refresh_s: float = 5.0
@@ -195,15 +200,15 @@ class GameConfig:
 
     # -- Fills: competing dealers ----------------------------------------------
     # Three dealers sharing one model. Each mid is the truth plus a share of
-    # the screen's error (dealers watch the same screen, so when it is a tick
+    # the screen's error (dealers watch the same screen, so when it reads
     # rich the street leans rich) plus the dealer's own persistent error. Both
     # components persist for minutes, so cover calibrates but cannot be
     # averaged down to the truth. Each quotes mid +/- a half-spread, rounded
     # to the nearest tick, widening for size and around prints -- public
     # information only. Dealers never adapt during a session.
     n_competitors: int = 3
-    competitor_half_spread_ticks: float = 1.0
-    competitor_size_widen_ticks: float = 1.0  # extra half-spread per 100 lots
+    competitor_half_spread_bp: float = 0.5
+    competitor_size_widen_bp: float = 0.5  # extra half-spread per 100 lots
     competitor_print_widen: float = 1.0  # half-spread x (1 + this) at a print
     competitor_print_window_s: float = 120.0  # widening tapers to 0 this far out
     competitor_screen_weight: float = 0.75
@@ -212,12 +217,12 @@ class GameConfig:
 
     # -- Fills: client limits --------------------------------------------------
     # Every RFQ carries the worst price the client accepts on their side.
-    # Uninformed: the screen plus a tolerance, lognormal around about a tick,
-    # occasionally ~3, growing mildly with size: median 1.5 ticks, ~16% below
-    # one tick, ~4% above three. Informed: at least that, and
-    # up to the screen plus a share of their expected move -- they give up
-    # roughly half their edge, so a wide fill is evidence, never proof.
-    client_tolerance_ticks: float = 1.5
+    # Uninformed: the screen plus a tolerance, lognormal, growing mildly with
+    # size: median 0.75bp, ~16% below 0.5bp, ~4% above 1.5bp. Informed: at
+    # least that, and up to the screen plus a share of their expected move --
+    # they give up roughly half their edge, so a wide fill is evidence, never
+    # proof.
+    client_tolerance_bp: float = 0.75
     client_tolerance_log_sd: float = 0.4
     client_tolerance_size_growth: float = 0.5  # tolerance x (1 + this * size / 100)
     informed_edge_given_up: float = 0.5
@@ -227,15 +232,15 @@ class GameConfig:
     # with size and widens around prints. Priced off the screen, never the
     # truth. Validation proves the per-lot cost exceeds the furthest a
     # competitor quote can sit from its own mid -- half-spread plus half a
-    # tick of rounding -- by hedge_margin_ticks at every size up to the cap
-    # and every distance from a print, so quote-fill-hedge is never riskless
-    # by construction. The closing liquidation is the same cost times
+    # tick of rounding -- by hedge_margin_bp at every size up to the cap and
+    # every distance from a print, so quote-fill-hedge is never riskless by
+    # construction. The closing liquidation is the same cost times
     # close_liquidation_multiplier: the hedge you didn't do, at a worse time.
-    hedge_cost_ticks: float = 2.0
-    hedge_impact_ticks: float = 1.0  # extra per-lot cost per 100 lots
+    hedge_cost_bp: float = 1.0
+    hedge_impact_bp: float = 0.5  # extra per-lot cost per 100 lots
     hedge_print_widen: float = 1.0
     hedge_print_window_s: float = 120.0
-    hedge_margin_ticks: float = 0.5
+    hedge_margin_bp: float = 0.25
     close_liquidation_multiplier: float = 1.5
 
     # -- Position limit --------------------------------------------------------
@@ -443,25 +448,29 @@ class GameConfig:
         # Fills: competitors.
         if not self.n_competitors >= 1:
             raise ValueError(f"n_competitors must be at least 1, got {self.n_competitors}")
-        if not (math.isfinite(self.competitor_half_spread_ticks) and self.competitor_half_spread_ticks >= 0.5):
+        if not (
+            math.isfinite(self.competitor_half_spread_bp)
+            and self.competitor_half_spread_bp >= self.tick_size / 2
+        ):
             # Below half a tick, rounding to the nearest tick could put a
-            # dealer's bid at or above its own mid.
+            # dealer's bid at or above its own mid. The one place the grid
+            # constrains an economic parameter, and it says so.
             raise ValueError(
-                "competitor_half_spread_ticks must be at least 0.5, got "
-                f"{self.competitor_half_spread_ticks}"
+                f"competitor_half_spread_bp must be at least half a tick ({self.tick_size / 2}bp), "
+                f"got {self.competitor_half_spread_bp}"
             )
         for name in (
-            "competitor_size_widen_ticks",
+            "competitor_size_widen_bp",
             "competitor_print_widen",
             "competitor_print_window_s",
             "competitor_error_bp",
             "competitor_error_corr_s",
             "client_tolerance_log_sd",
             "client_tolerance_size_growth",
-            "hedge_impact_ticks",
+            "hedge_impact_bp",
             "hedge_print_widen",
             "hedge_print_window_s",
-            "hedge_margin_ticks",
+            "hedge_margin_bp",
         ):
             value = getattr(self, name)
             if not (math.isfinite(value) and value >= 0):
@@ -472,9 +481,9 @@ class GameConfig:
             )
 
         # Fills: client limits.
-        if not (math.isfinite(self.client_tolerance_ticks) and self.client_tolerance_ticks > 0):
+        if not (math.isfinite(self.client_tolerance_bp) and self.client_tolerance_bp > 0):
             raise ValueError(
-                f"client_tolerance_ticks must be finite and positive, got {self.client_tolerance_ticks}"
+                f"client_tolerance_bp must be finite and positive, got {self.client_tolerance_bp}"
             )
         if not 0 <= self.informed_edge_given_up <= 1:
             raise ValueError(
@@ -482,8 +491,8 @@ class GameConfig:
             )
 
         # Hedge venue and closing.
-        if not (math.isfinite(self.hedge_cost_ticks) and self.hedge_cost_ticks > 0):
-            raise ValueError(f"hedge_cost_ticks must be finite and positive, got {self.hedge_cost_ticks}")
+        if not (math.isfinite(self.hedge_cost_bp) and self.hedge_cost_bp > 0):
+            raise ValueError(f"hedge_cost_bp must be finite and positive, got {self.hedge_cost_bp}")
         if not (math.isfinite(self.close_liquidation_multiplier) and self.close_liquidation_multiplier >= 1):
             raise ValueError(
                 "close_liquidation_multiplier must be at least 1, got "
@@ -494,8 +503,8 @@ class GameConfig:
             size, seconds, gap = shortfall
             raise ValueError(
                 "hedge cost must exceed the furthest competitor quote by "
-                f"hedge_margin_ticks={self.hedge_margin_ticks} everywhere; at size {size} "
-                f"and {seconds}s from a print the excess is {gap:.4f} ticks"
+                f"hedge_margin_bp={self.hedge_margin_bp} everywhere; at size {size} "
+                f"and {seconds}s from a print the excess is {gap:.4f}bp"
             )
 
         # Position limit.
@@ -556,28 +565,28 @@ class GameConfig:
             return 0.0
         return max(0.0, 1.0 - abs(seconds_to_print) / window_s)
 
-    def competitor_half_spread_ticks_at(self, size: float, seconds_to_print: float) -> float:
-        """A dealer's half-spread before rounding: base plus size, times the
-        widening around a print."""
-        base = self.competitor_half_spread_ticks + self.competitor_size_widen_ticks * size / 100.0
+    def competitor_half_spread_bp_at(self, size: float, seconds_to_print: float) -> float:
+        """A dealer's half-spread in bp before rounding: base plus size, times
+        the widening around a print."""
+        base = self.competitor_half_spread_bp + self.competitor_size_widen_bp * size / 100.0
         widen = 1.0 + self.competitor_print_widen * self._proximity(seconds_to_print, self.competitor_print_window_s)
         return base * widen
 
-    def competitor_max_quote_distance_ticks(self, size: float, seconds_to_print: float) -> float:
-        """The furthest a dealer's rounded quote can sit from its own mid:
+    def competitor_max_quote_distance_bp(self, size: float, seconds_to_print: float) -> float:
+        """The furthest a dealer's rounded quote can sit from its own mid, bp:
         the half-spread plus half a tick of rounding to the nearest tick."""
-        return self.competitor_half_spread_ticks_at(size, seconds_to_print) + 0.5
+        return self.competitor_half_spread_bp_at(size, seconds_to_print) + self.tick_size / 2
 
-    def hedge_cost_ticks_at(self, size: float, seconds_to_print: float) -> float:
-        """Per-lot hedge cost: base plus impact growing with size, times the
-        widening around a print."""
-        base = self.hedge_cost_ticks + self.hedge_impact_ticks * size / 100.0
+    def hedge_cost_bp_at(self, size: float, seconds_to_print: float) -> float:
+        """Per-lot hedge cost in bp: base plus impact growing with size, times
+        the widening around a print."""
+        base = self.hedge_cost_bp + self.hedge_impact_bp * size / 100.0
         widen = 1.0 + self.hedge_print_widen * self._proximity(seconds_to_print, self.hedge_print_window_s)
         return base * widen
 
     def hedge_margin_shortfall(self) -> tuple[float, float, float] | None:
         """Where hedging is not dearer than the furthest competitor quote by
-        ``hedge_margin_ticks``, if anywhere: (size, seconds, excess), else None.
+        ``hedge_margin_bp``, if anywhere: (size, seconds, excess in bp), else None.
 
         Exact, not sampled. For a fixed distance both functions are linear in
         size, so the excess is smallest at size 1 or at the cap; for a fixed
@@ -591,14 +600,20 @@ class GameConfig:
             (
                 size,
                 seconds,
-                self.hedge_cost_ticks_at(size, seconds)
-                - self.competitor_max_quote_distance_ticks(size, seconds),
+                self.hedge_cost_bp_at(size, seconds)
+                - self.competitor_max_quote_distance_bp(size, seconds),
             )
             for size in (1.0, float(self.size_cap_lots))
             for seconds in distances
         ]
         worst = min(corners, key=lambda c: c[2])
-        return worst if worst[2] < self.hedge_margin_ticks - 1e-12 else None
+        return worst if worst[2] < self.hedge_margin_bp - 1e-12 else None
+
+    @property
+    def dollars_per_bp_per_lot(self) -> float:
+        """The one conversion from bp-lots to money. P&L is computed in bp-lots
+        and converted here, so the tick never enters an economic number."""
+        return self.tick_value / self.tick_size
 
     @property
     def rfq_arrival_prob(self) -> float:

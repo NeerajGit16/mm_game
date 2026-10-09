@@ -89,16 +89,29 @@ def test_hedge_prices_off_the_screen_plus_cost():
     seconds = pub.seconds_to_nearest_print(step)
     buy = market.hedge(step, 40, 0, pub, cfg)
     sell = market.hedge(step, -40, 0, pub, cfg)
-    cost = cfg.hedge_cost_ticks_at(40, seconds)
-    assert buy.price == pytest.approx(pub.screen_at(step) + cost * cfg.tick_size)
-    assert sell.price == pytest.approx(pub.screen_at(step) - cost * cfg.tick_size)
-    assert buy.cost_ticks_per_lot == cost and buy.cost_bp == pytest.approx(40 * cost)
+    cost = cfg.hedge_cost_bp_at(40, seconds)
+    assert buy.price == pytest.approx(pub.screen_at(step) + cost)
+    assert sell.price == pytest.approx(pub.screen_at(step) - cost)
+    assert buy.cost_bp_per_lot == cost and buy.cost_bp == pytest.approx(40 * cost)
 
-    small = market.hedge(step, 5, 0, pub, cfg).cost_ticks_per_lot
-    large = market.hedge(step, 90, 0, pub, cfg).cost_ticks_per_lot
+    small = market.hedge(step, 5, 0, pub, cfg).cost_bp_per_lot
+    large = market.hedge(step, 90, 0, pub, cfg).cost_bp_per_lot
     assert large > small
     e = int(pub.event_steps[0])
-    assert market.hedge(e, 10, 0, pub, cfg).cost_ticks_per_lot > market.hedge(e - 3000, 10, 0, pub, cfg).cost_ticks_per_lot
+    assert market.hedge(e, 10, 0, pub, cfg).cost_bp_per_lot > market.hedge(e - 3000, 10, 0, pub, cfg).cost_bp_per_lot
+
+
+def test_hedge_cost_in_bp_does_not_move_with_the_tick():
+    """The same hedge at the same step costs the same bp per lot at a
+    quarter-bp and a half-bp tick. A cost reintroduced in ticks would halve
+    every hedge with the tick change, and nothing else would notice."""
+    fine, coarse = GameConfig(), GameConfig(tick_size=0.5, tick_value=25.0)
+    a, b = path_for(fine, 5).public, path_for(coarse, 5).public
+    for step in (0, 4321, 50_000):
+        for qty in (3, -40, 100):
+            x, y = market.hedge(step, qty, 0, a, fine), market.hedge(step, qty, 0, b, coarse)
+            assert x.cost_bp_per_lot == y.cost_bp_per_lot
+            assert x.price - a.screen_at(step) == pytest.approx(y.price - b.screen_at(step))
 
 
 def test_no_stale_hedge_after_a_print():
@@ -115,10 +128,10 @@ def test_no_stale_hedge_after_a_print():
         for e in (int(x) for x in path.event_steps if x % r):
             stale = float(pub.screen[np.searchsorted(pub.screen_steps, e - 1, side="right") - 1])
             fill = market.hedge(e, 1, 0, pub, cfg)
-            assert fill.price == pytest.approx(pub.screen_at(e) + fill.cost_ticks_per_lot * cfg.tick_size)
+            assert fill.price == pytest.approx(pub.screen_at(e) + fill.cost_bp_per_lot)
             if pub.screen_at(e) != stale:
                 found += 1
-                assert fill.price != pytest.approx(stale + fill.cost_ticks_per_lot * cfg.tick_size)
+                assert fill.price != pytest.approx(stale + fill.cost_bp_per_lot)
     assert found > 20
 
 
@@ -152,13 +165,13 @@ def test_liquidation_cost_is_zero_flat_and_grows_with_size():
     assert market.liquidate(0, n, pub, cfg).cost_bp == 0.0
     totals = [market.liquidate(p, n, pub, cfg).cost_bp for p in (10, 50, 100, 200)]
     assert all(b > a for a, b in zip(totals, totals[1:]))
-    per_lot = [market.liquidate(p, n, pub, cfg).cost_ticks_per_lot for p in (10, 50, 100, 200)]
+    per_lot = [market.liquidate(p, n, pub, cfg).cost_bp_per_lot for p in (10, 50, 100, 200)]
     assert all(b > a for a, b in zip(per_lot, per_lot[1:]))
     assert market.liquidate(120, n, pub, cfg).cost_bp == market.liquidate(-120, n, pub, cfg).cost_bp
     long = market.liquidate(120, n, pub, cfg)
-    expected = cfg.hedge_cost_ticks_at(120, pub.seconds_to_nearest_print(n)) * cfg.close_liquidation_multiplier
-    assert long.quantity == -120 and long.cost_ticks_per_lot == pytest.approx(expected)
-    assert long.price == pytest.approx(pub.screen_at(n) - expected * cfg.tick_size)
+    expected = cfg.hedge_cost_bp_at(120, pub.seconds_to_nearest_print(n)) * cfg.close_liquidation_multiplier
+    assert long.quantity == -120 and long.cost_bp_per_lot == pytest.approx(expected)
+    assert long.price == pytest.approx(pub.screen_at(n) - expected)
     # Dearer than hedging the same position just before the close.
     assert long.cost_bp > market.hedge(n - 1, -120, 120, pub, cfg).cost_bp
 
@@ -172,7 +185,7 @@ def brute_force_min_excess(cfg: GameConfig) -> float:
     sizes = np.arange(1, cfg.size_cap_lots + 1)
     seconds = np.concatenate([np.arange(0, 400, 0.5), [1e9]])
     return min(
-        cfg.hedge_cost_ticks_at(s, d) - cfg.competitor_max_quote_distance_ticks(s, d)
+        cfg.hedge_cost_bp_at(s, d) - cfg.competitor_max_quote_distance_bp(s, d)
         for s in sizes
         for d in seconds
     )
@@ -181,14 +194,15 @@ def brute_force_min_excess(cfg: GameConfig) -> float:
 def test_hedge_margin_holds_everywhere_at_the_defaults_and_the_check_is_exact():
     """The rule: per-lot hedge cost exceeds the furthest a competitor quote
     can sit from its own mid (half-spread plus half a tick of rounding) by
-    hedge_margin_ticks at every size and every distance from a print. The
+    hedge_margin_bp at every size and every distance from a print. The
     config checks a handful of corners; a brute-force sweep over every size
     and distances in half-second steps agrees with it, so the corners are
-    not missing an interior minimum."""
+    not missing an interior minimum. At the quarter-bp tick the rounding
+    term is 0.125bp, so the excess is 0.375bp against a required 0.25bp."""
     cfg = GameConfig()
     assert cfg.hedge_margin_shortfall() is None
-    assert brute_force_min_excess(cfg) >= cfg.hedge_margin_ticks - 1e-9
-    assert brute_force_min_excess(cfg) == pytest.approx(0.5, abs=0.02)  # binds far from a print
+    assert brute_force_min_excess(cfg) >= cfg.hedge_margin_bp - 1e-9
+    assert brute_force_min_excess(cfg) == pytest.approx(0.375, abs=0.01)  # binds far from a print
 
 
 def unvalidated(**changes) -> GameConfig:
@@ -203,8 +217,8 @@ def unvalidated(**changes) -> GameConfig:
 @pytest.mark.parametrize(
     "change",
     [
-        dict(hedge_cost_ticks=1.8),  # too cheap everywhere
-        dict(hedge_impact_ticks=0.5),  # dealers widen for size faster than the venue
+        dict(hedge_cost_bp=0.85),  # too cheap everywhere
+        dict(hedge_impact_bp=0.25),  # dealers widen for size faster than the venue
         dict(hedge_print_widen=0.2),  # dealers widen into the print, the venue barely does
         dict(hedge_print_window_s=30.0),  # the venue stops widening while dealers still are
     ],
@@ -225,9 +239,9 @@ def test_hedge_margin_violations_are_refused(change):
         GameConfig(**change)
     bad = unvalidated(**change)
     size, seconds, excess = bad.hedge_margin_shortfall()
-    assert excess < GameConfig().hedge_margin_ticks
+    assert excess < GameConfig().hedge_margin_bp
     assert excess == pytest.approx(
-        bad.hedge_cost_ticks_at(size, seconds) - bad.competitor_max_quote_distance_ticks(size, seconds)
+        bad.hedge_cost_bp_at(size, seconds) - bad.competitor_max_quote_distance_bp(size, seconds)
     )
     assert brute_force_min_excess(bad) == pytest.approx(excess, abs=1e-9)
 
@@ -248,7 +262,8 @@ def test_quote_fill_hedge_is_not_riskless_in_play():
         pub = path.public
         position = 0
         for rfq, side_ in zip(schedule.rfqs, sides):
-            x = math.ceil(cfg.hedge_cost_ticks_at(rfq.size, pub.seconds_to_nearest_print(rfq.step)) - 1e-9)
+            cost = cfg.hedge_cost_bp_at(rfq.size, pub.seconds_to_nearest_print(rfq.step))
+            x = math.ceil(cost / cfg.tick_size - 1e-9)
             s = pub.screen_at(rfq.step)
             quote = Quote(rfq.ordinal, bid=s - x * cfg.tick_size, ask=s + x * cfg.tick_size)
             report = fills.resolve(rfq, quote, side_, cfg)
@@ -257,6 +272,6 @@ def test_quote_fill_hedge_is_not_riskless_in_play():
                 position += report.quantity
                 hedge = market.hedge(rfq.step, -report.quantity, position, pub, cfg)
                 position += hedge.quantity
-                edge = abs(report.price - s) - hedge.cost_ticks_per_lot * cfg.tick_size
+                edge = abs(report.price - s) - hedge.cost_bp_per_lot
                 assert edge >= 0  # if it ever fills, it is riskless: that is the failure
     assert fills_count / 40 < 0.1

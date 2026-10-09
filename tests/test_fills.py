@@ -56,6 +56,16 @@ def around_screen(cfg: GameConfig, width_ticks: int):
     return quote
 
 
+def ticks_for(cfg: GameConfig, width_bp: float) -> int:
+    """A half-width given in bp, as whole ticks. Statistical tests state their
+    widths in bp so they test the same economics whatever the tick; a width
+    that is not on the grid is a test bug, not a rounding to absorb."""
+    k = round(width_bp / cfg.tick_size)
+    if not math.isclose(k * cfg.tick_size, width_bp):
+        raise ValueError(f"{width_bp}bp is not a whole number of {cfg.tick_size}bp ticks")
+    return k
+
+
 def play(cfg: GameConfig, seed: int, quote_fn):
     """The smallest session loop: quote, apply the limit, resolve, book."""
     path, schedule, sides = world(cfg, seed)
@@ -218,11 +228,11 @@ def cover_errors(cfg: GameConfig, seeds) -> list[np.ndarray]:
         path, schedule, sides = world(cfg, seed)
         errs = []
         for rfq, market in zip(schedule.rfqs, sides):
-            hs = cfg.competitor_half_spread_ticks_at(rfq.size, path.public.seconds_to_nearest_print(rfq.step))
+            hs = cfg.competitor_half_spread_bp_at(rfq.size, path.public.seconds_to_nearest_print(rfq.step))
             if rfq.side is Side.BUY:
-                implied = from_ticks(market.best_ask_ticks, cfg) - hs * cfg.tick_size
+                implied = from_ticks(market.best_ask_ticks, cfg) - hs
             else:
-                implied = from_ticks(market.best_bid_ticks, cfg) + hs * cfg.tick_size
+                implied = from_ticks(market.best_bid_ticks, cfg) + hs
             errs.append(implied - path.values[rfq.step])
         out.append(np.array(errs))
     return out
@@ -264,15 +274,16 @@ def test_cover_cannot_be_averaged_down_to_the_truth():
 def test_winners_curse_fingerprint_exists_and_is_faint(stat_worlds):
     """Among fills won at a wide price, informed clients are
     over-represented -- they accept prices uninformed clients walk from --
-    but nowhere near certain. At +/-2 ticks the informed share of wins is
-    about three times the base rate and still a minority: "if they trade at
+    but nowhere near certain. At +/-1bp the informed share of wins is
+    several times the base rate and still a minority: "if they trade at
     my wide price, I should worry", never "they must be informed"."""
     cfg = STAT
+    w = ticks_for(cfg, 1.0) * cfg.tick_size
     won = informed_won = rfqs = informed_rfqs = 0
     for path, schedule, sides in stat_worlds:
         for rfq, market in zip(schedule.rfqs, sides):
             s = path.public.screen_at(rfq.step)
-            quote = Quote(rfq.ordinal, bid=s - 2 * cfg.tick_size, ask=s + 2 * cfg.tick_size)
+            quote = Quote(rfq.ordinal, bid=s - w, ask=s + w)
             report = fills.resolve(rfq, quote, market, cfg)
             rfqs += 1
             informed_rfqs += rfq.informed
@@ -362,15 +373,16 @@ def test_ties_are_broken_by_the_pre_drawn_uniform(at_best, threshold):
 
 
 def test_tie_win_rate_matches_the_rule(stat_worlds):
-    """Statistically: over every accepted tie at +/-1 tick, the win rate
-    matches the mean of 1 / (k + 1). Ties are most RFQs at the natural width,
-    so a biased tie-break would bias the whole hit rate."""
+    """Statistically: over every accepted tie at +/-0.5bp, the win rate
+    matches the mean of 1 / (k + 1). Ties are still a large share of RFQs at
+    the natural width, so a biased tie-break would bias the hit rate there."""
     cfg = STAT
+    w = ticks_for(cfg, 0.5) * cfg.tick_size
     won, expected = [], []
     for path, schedule, sides in stat_worlds[:100]:
         for rfq, market in zip(schedule.rfqs, sides):
             s = path.public.screen_at(rfq.step)
-            quote = Quote(rfq.ordinal, bid=s - cfg.tick_size, ask=s + cfg.tick_size)
+            quote = Quote(rfq.ordinal, bid=s - w, ask=s + w)
             ticks = market.competitor_ask_ticks if rfq.side is Side.BUY else market.competitor_bid_ticks
             best = market.best_ask_ticks if rfq.side is Side.BUY else market.best_bid_ticks
             yours = to_ticks(quote.ask if rfq.side is Side.BUY else quote.bid, cfg)
@@ -480,22 +492,22 @@ def test_competitor_quotes_sit_on_the_grid_and_widen_for_size_and_prints(stat_wo
         for rfq, market in zip(schedule.rfqs, sides):
             spreads = np.array(market.competitor_ask_ticks) - np.array(market.competitor_bid_ticks)
             assert np.all(spreads >= 1)
-            spread = float(spreads.mean())
+            spread = float(spreads.mean()) * STAT.tick_size  # bp
             if rfq.size <= 8:
                 by_size["small"].append(spread)
             elif rfq.size >= 40:
                 by_size["large"].append(spread)
             seconds = path.public.seconds_to_nearest_print(rfq.step)
             (near if seconds <= 30 else far if seconds >= 200 else []).append(spread)
-    assert np.mean(by_size["large"]) > np.mean(by_size["small"]) + 0.5
-    assert np.mean(near) > np.mean(far) + 1.0
+    assert np.mean(by_size["large"]) > np.mean(by_size["small"]) + 0.25
+    assert np.mean(near) > np.mean(far) + 0.5
 
 
-def test_uninformed_tolerance_is_mostly_a_tick_and_a_half():
-    """Uninformed limits: median 1.5 ticks from the screen, ~16% under one
-    tick, ~4% beyond three -- "most accept about a tick away, the occasional
-    urgent client up to ~3". Checked with size growth off so the shape is
-    the configured lognormal's."""
+def test_uninformed_tolerance_is_mostly_three_quarters_of_a_bp():
+    """Uninformed limits: median 0.75bp from the screen, ~16% under 0.5bp,
+    ~4% beyond 1.5bp -- "most accept a little over the spread, the
+    occasional urgent client three times that". Checked with size growth off
+    so the shape is the configured lognormal's."""
     cfg = dataclasses.replace(STAT, client_tolerance_size_growth=0.0)
     distances = []
     for seed in range(150):
@@ -503,45 +515,108 @@ def test_uninformed_tolerance_is_mostly_a_tick_and_a_half():
         for rfq, market in zip(schedule.rfqs, sides):
             if not rfq.informed:
                 screen = path.public.screen_at(rfq.step)
-                distances.append(int(rfq.side) * (market.client_limit - screen) / cfg.tick_size)
+                distances.append(int(rfq.side) * (market.client_limit - screen))
     d = np.array(distances)
     assert d.size > 10_000
-    assert abs(np.median(d) - 1.5) < 0.05
-    assert 0.12 < np.mean(d < 1.0) < 0.20
-    assert 0.02 < np.mean(d > 3.0) < 0.06
+    assert abs(np.median(d) - 0.75) < 0.025
+    assert 0.12 < np.mean(d < 0.5) < 0.20
+    assert 0.02 < np.mean(d > 1.5) < 0.06
 
 
 def test_informed_clients_pay_wider_and_rarely_walk(stat_worlds):
     """Informed limits sit wider than uninformed -- they give up about half
     their expected move -- but the ranges overlap, so a wide fill is evidence
-    and not proof. At the natural width informed clients almost never walk,
-    so a NOT_DONE carries the opposite signal."""
+    and not proof. At the natural width (+/-0.5bp) informed clients almost
+    never walk, so a NOT_DONE carries the opposite signal."""
     cfg = STAT
+    w = ticks_for(cfg, 0.5) * cfg.tick_size
     dist = {True: [], False: []}
     walked = {True: [], False: []}
     for path, schedule, sides in stat_worlds:
         for rfq, market in zip(schedule.rfqs, sides):
             s = path.public.screen_at(rfq.step)
-            dist[rfq.informed].append(int(rfq.side) * (market.client_limit - s) / cfg.tick_size)
-            report = fills.resolve(rfq, Quote(rfq.ordinal, bid=s - cfg.tick_size, ask=s + cfg.tick_size), market, cfg)
+            dist[rfq.informed].append(int(rfq.side) * (market.client_limit - s))
+            report = fills.resolve(rfq, Quote(rfq.ordinal, bid=s - w, ask=s + w), market, cfg)
             walked[rfq.informed].append(report.outcome is Outcome.NOT_DONE)
     inf, unin = np.array(dist[True]), np.array(dist[False])
-    assert np.median(inf) > np.median(unin) + 0.4
+    assert np.median(inf) > np.median(unin) + 0.2
     assert np.mean(unin > np.median(inf)) > 0.05  # overlap: plenty of uninformed beyond the informed median
     assert np.mean(walked[True]) < 0.04 < np.mean(walked[False])
 
 
-def test_hit_rate_at_one_tick_is_near_a_third():
-    """Calibration target: quoting one tick either side of the screen
-    against three dealers wins roughly a third of RFQs. Measured ~28%; the
-    band allows tuning in play without silently drifting to a different game."""
+def hit_and_tie_curve(cfg: GameConfig, widths: tuple[int, ...], seeds) -> dict[int, tuple[float, float]]:
+    """Per half-width in ticks: (hit rate, share of wins that were ties)."""
+    out = {}
+    worlds = [world(cfg, s) for s in seeds]
+    for k in widths:
+        won = won_on_tie = total = 0
+        for path, schedule, sides in worlds:
+            for rfq, market in zip(schedule.rfqs, sides):
+                s = path.public.screen_at(rfq.step)
+                quote = Quote(rfq.ordinal, bid=s - k * cfg.tick_size, ask=s + k * cfg.tick_size)
+                report = fills.resolve(rfq, quote, market, cfg)
+                best = market.best_ask_ticks if rfq.side is Side.BUY else market.best_bid_ticks
+                mine = to_ticks(quote.ask if rfq.side is Side.BUY else quote.bid, cfg)
+                total += 1
+                if report.outcome is Outcome.WON:
+                    won += 1
+                    won_on_tie += mine == best
+        out[k] = (won / total, won_on_tie / max(won, 1))
+    return out
+
+
+def test_hit_rate_at_half_a_bp_is_near_a_third():
+    """Calibration target: quoting 0.5bp either side of the screen against
+    three dealers wins roughly a third of RFQs. Measured ~34%; the band
+    allows tuning in play without silently drifting to a different game."""
     cfg = GameConfig()
     won = total = 0
     for seed in range(20):
-        _, _, _, reports, _ = play(cfg, seed, around_screen(cfg, 1))
+        _, _, _, reports, _ = play(cfg, seed, around_screen(cfg, ticks_for(cfg, 0.5)))
         won += sum(r.outcome is Outcome.WON for r in reports)
         total += len(reports)
-    assert 0.22 < won / total < 0.38
+    assert 0.27 < won / total < 0.42
+
+
+def test_the_grid_resolves_the_competitive_range():
+    """At the quarter-bp tick, one, two and three ticks either side of the
+    screen are three distinct choices -- hit rates near 78%, 34% and 6% --
+    and at the first two, most wins are outright rather than tie-breaks.
+
+    The failure it catches is a grid as coarse as the dealers' dispersion
+    around the screen. The negative control is the old half-bp tick at the
+    same bp economics: there one tick wide was decided mostly by ties and one
+    tick wider won almost nothing, so the width decision was binary."""
+    fine = hit_and_tie_curve(GameConfig(), (1, 2, 3), range(15))
+    (h1, t1), (h2, t2), (h3, _) = fine[1], fine[2], fine[3]
+    assert h1 > h2 > h3
+    assert 0.65 < h1 < 0.88 and 0.27 < h2 < 0.42 and 0.03 < h3 < 0.10
+    assert t1 < 0.30 and t2 < 0.55
+
+    coarse = hit_and_tie_curve(GameConfig(tick_size=0.5, tick_value=25.0), (1, 2), range(15))
+    assert coarse[1][1] > 0.55  # wins at the natural width mostly ties
+    assert coarse[2][0] < 0.03  # and one tick wider wins almost nothing
+
+
+def test_a_tick_change_moves_prices_not_economics():
+    """Same seed at a quarter-bp and a half-bp tick (both $50/bp/lot):
+    dealer mids and every client's limit distance from the screen are
+    identical in bp, and dealer quotes differ only by rounding to the grid.
+    A tolerance or spread reintroduced in ticks would rescale silently with
+    the tick, and this is where it shows."""
+    fine, coarse = GameConfig(), GameConfig(tick_size=0.5, tick_value=25.0)
+    pa, sa, ma = world(fine, 8)
+    pb, sb, mb = world(coarse, 8)
+    assert sa.rfqs == sb.rfqs
+    for rfq, x, y in zip(sa.rfqs, ma, mb):
+        assert x.competitor_mids == y.competitor_mids
+        assert x.client_limit - pa.public.screen_at(rfq.step) == pytest.approx(
+            y.client_limit - pb.public.screen_at(rfq.step), abs=1e-9
+        )
+        hs = fine.competitor_half_spread_bp_at(rfq.size, pa.public.seconds_to_nearest_print(rfq.step))
+        for cfg, m in ((fine, x), (coarse, y)):
+            for mid, ask in zip(m.competitor_mids, m.competitor_ask_ticks):
+                assert abs(from_ticks(ask, cfg) - (mid + hs)) <= cfg.tick_size / 2 + 1e-9
 
 
 # --------------------------------------------------------------------------
@@ -584,10 +659,10 @@ def test_acceptance_and_competition_never_move_each_other():
     the dealers: every limit and tie-break is bit-identical."""
     base = fills.pregenerate(GameConfig(), *world_inputs(GameConfig(), 6))
     tolerant = fills.pregenerate(
-        GameConfig(client_tolerance_ticks=3.0, client_tolerance_log_sd=0.1),
-        *world_inputs(GameConfig(client_tolerance_ticks=3.0, client_tolerance_log_sd=0.1), 6),
+        GameConfig(client_tolerance_bp=1.5, client_tolerance_log_sd=0.1),
+        *world_inputs(GameConfig(client_tolerance_bp=1.5, client_tolerance_log_sd=0.1), 6),
     )
-    dealers = GameConfig(competitor_error_bp=0.4, competitor_half_spread_ticks=1.5, hedge_cost_ticks=2.6)
+    dealers = GameConfig(competitor_error_bp=0.4, competitor_half_spread_bp=0.75, hedge_cost_bp=1.3)
     retuned = fills.pregenerate(dealers, *world_inputs(dealers, 6))
     for a, b, c in zip(base, tolerant, retuned):
         assert (a.competitor_bid_ticks, a.competitor_ask_ticks) == (b.competitor_bid_ticks, b.competitor_ask_ticks)

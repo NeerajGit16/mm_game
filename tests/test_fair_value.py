@@ -561,10 +561,10 @@ def test_screen_error_is_persistent_and_bounded():
 
 def test_screen_error_cannot_be_averaged_away():
     """The reason for persistence. With independent noise a one-minute average
-    of 12 readings has stdev 0.29 of a tick and pins fair value to a third of a
-    tick; the coarse anchor is defeated in a minute of patience. With a 90 s
-    correlation time the same average has stdev 0.90 of a tick -- worth 1.2
-    readings, not 12. A correlation time of 0 recovers the white screen, and
+    of 12 readings has stdev 0.29 of the error's (0.14bp) and pins fair value
+    to about half a tick; the coarse anchor is defeated in a minute of
+    patience. With a 90 s correlation time the same average has stdev 0.90 of
+    the error's (0.45bp) -- worth 1.2 readings, not 12. A correlation time of 0 recovers the white screen, and
     both regimes are checked so the parameter is proven to do something.
     """
     n_block = round(60.0 / GameConfig().screen_refresh_s)  # 12 readings per minute
@@ -621,11 +621,12 @@ def test_screen_is_whole_ticks_from_start_level(start_level):
 
 def test_rounded_screen_is_sticky_not_jittery():
     """Why the AR(1) sits underneath the rounding. A persistent error moves
-    ~0.17bp per refresh against a 0.5bp tick, so the rounded reading stays on
-    its tick about three refreshes in four and then flips. Independent noise
-    moves ~0.7bp per refresh and the reading changes most of the time -- a
-    screen that flickers. Checked as the fraction of refreshes on which the
-    screen does not change, in both regimes.
+    ~0.17bp per refresh against a 0.25bp tick, so the rounded reading holds
+    its tick about half the time and moves one tick when it moves. Independent
+    noise moves ~0.7bp per refresh and the reading changes six times in seven,
+    often by several ticks -- a screen that flickers. Checked as the fraction
+    of refreshes on which the screen does not change, in both regimes.
+    (Measured 0.50 and 0.14; at the old half-bp tick, 0.73 and 0.27.)
     """
 
     def unchanged_fraction(cfg: GameConfig) -> float:
@@ -633,9 +634,9 @@ def test_rounded_screen_is_sticky_not_jittery():
 
     sticky = unchanged_fraction(GameConfig())
     jittery = unchanged_fraction(GameConfig(screen_noise_corr_s=0.0))
-    assert sticky > 0.55
-    assert jittery < 0.45
-    assert sticky > jittery + 0.15
+    assert sticky > 0.42
+    assert jittery < 0.22
+    assert sticky > jittery + 0.25
 
 
 def test_screen_reading_is_piecewise_constant_with_known_age():
