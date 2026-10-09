@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 import os
 import subprocess
 import sys
@@ -50,6 +51,53 @@ def test_defaults_match_the_instrument_spec():
     assert cfg.screen_noise_corr_s == 90.0
     assert cfg.screen_refresh_s == 5.0
     assert cfg.markout_horizons_s == (10.0, 60.0, 300.0)
+    assert cfg.rfq_rate_per_hour == 100.0
+    assert (cfg.n_hedge_funds, cfg.n_real_money, cfg.n_corporates) == (6, 6, 4)
+    assert (cfg.informed_prob_hedge_fund, cfg.informed_prob_real_money, cfg.informed_prob_corporate) == (
+        0.50,
+        0.15,
+        0.05,
+    )
+    assert cfg.informed_activity_multiplier == 1.0
+    assert (cfg.informed_accuracy, cfg.informed_signal_noise) == (0.80, 0.25)
+    assert (cfg.size_median_lots, cfg.size_log_sd, cfg.size_cap_lots) == (10.0, 0.9, 100)
+    assert (cfg.informed_size_ref_bp, cfg.informed_size_factor_min, cfg.informed_size_factor_max) == (1.5, 1.0, 3.0)
+    assert (cfg.crowd_drift_tilt, cfg.one_way_prob_uninformed, cfg.one_way_prob_informed) == (0.60, 0.05, 0.10)
+
+
+@pytest.mark.parametrize(
+    "minutes,length,clients,max_events,share",
+    [(30, 1800, 6, 1, 0.250), (60, 3600, 10, 2, 0.260), (120, 7200, 16, 2, 0.25625)],
+)
+def test_session_presets_are_explicit(minutes, length, clients, max_events, share):
+    """30 / 60 / 120 minutes set 6 / 10 / 16 clients explicitly -- ~8-12 RFQs
+    per client, which is what makes identity learnable -- and the print count
+    the event bounds can fit. Expected informed share stays ~25% on every
+    preset. The 120-minute preset is the default config, so the two can never
+    drift apart."""
+    cfg = GameConfig.for_session(minutes)
+    assert (cfg.session_length, cfg.n_clients, cfg.max_events) == (length, clients, max_events)
+    assert math.isclose(cfg.expected_informed_share, share)
+    rfqs_per_client = cfg.rfq_rate_per_hour * minutes / 60 / cfg.n_clients
+    assert 8 <= rfqs_per_client <= 13
+    assert GameConfig.for_session(120) == GameConfig()
+    assert GameConfig.for_session(60, rfq_rate_per_hour=50.0).rfq_rate_per_hour == 50.0
+    with pytest.raises(ValueError, match="no preset"):
+        GameConfig.for_session(45)
+
+
+def test_default_category_probabilities_are_strictly_between_zero_and_one():
+    """The design rule: no category is ever certainly clean or
+    certainly informed, so the label is a prior, not a classifier. Pinned on
+    the defaults rather than enforced in validation, because the experiment
+    independent streams exist for -- sweep the informed share from 0 to 1 on
+    an otherwise identical session -- needs 0 and 1 to be expressible."""
+    cfg = GameConfig()
+    for p in (cfg.informed_prob_hedge_fund, cfg.informed_prob_real_money, cfg.informed_prob_corporate):
+        assert 0 < p < 1
+    assert GameConfig(informed_prob_hedge_fund=0.0, informed_prob_real_money=1.0).n_clients == 16
+    # q must stay distinct from the crowd's agreement probability, or "informed" means nothing.
+    assert cfg.informed_accuracy > cfg.drift_prob_agree + 0.1
 
 
 def test_tick_is_half_a_basis_point_and_fifty_dollars_per_bp():
@@ -191,6 +239,26 @@ def test_round_trips_through_json_exactly():
         ("markout_horizons_s", (0,)),
         ("markout_horizons_s", (7201,)),
         ("markout_horizons_s", (10, 0.13)),
+        ("rfq_rate_per_hour", -1.0),
+        ("rfq_rate_per_hour", float("nan")),
+        ("rfq_rate_per_hour", 36_001.0),  # more than one RFQ per 0.1 s step
+        ("n_hedge_funds", -1),
+        ("informed_prob_hedge_fund", -0.1),
+        ("informed_prob_real_money", 1.1),
+        ("informed_prob_corporate", float("nan")),
+        ("informed_activity_multiplier", 0.0),
+        ("informed_activity_multiplier", float("inf")),
+        ("informed_accuracy", 1.5),
+        ("informed_signal_noise", -0.1),
+        ("size_median_lots", 0.0),
+        ("size_log_sd", -0.1),
+        ("size_cap_lots", 0),
+        ("informed_size_ref_bp", 0.0),
+        ("informed_size_factor_min", 0.0),
+        ("informed_size_factor_max", 0.5),  # below the default min of 1
+        ("crowd_drift_tilt", 1.2),
+        ("one_way_prob_uninformed", -0.01),
+        ("one_way_prob_informed", float("nan")),
     ],
 )
 def test_bad_values_rejected(field, bad):
@@ -199,6 +267,11 @@ def test_bad_values_rejected(field, bad):
     statistically identical to sigma > 0."""
     with pytest.raises(ValueError):
         GameConfig(**{field: bad})
+
+
+def test_roster_must_not_be_empty():
+    with pytest.raises(ValueError, match="at least one client"):
+        GameConfig(n_hedge_funds=0, n_real_money=0, n_corporates=0)
 
 
 def test_zero_vol_is_allowed():

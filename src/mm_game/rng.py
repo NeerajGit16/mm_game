@@ -44,14 +44,23 @@ class Stream(StrEnum):
     session; ``AGENTS`` is separate from everything so "strategy A vs strategy B
     on the same market" is a thing you can actually run.
 
-    The fair value process is split four ways for the same reason. ``EVENTS``
+    The fair value process is split five ways for the same reason. ``EVENTS``
     is the calendar of scheduled prints (how many, when); ``JUMPS`` is each
     print's hidden outcome, substreamed on event ordinal; ``DRIFT`` is the
     pre-event positioning regime, also per event; ``SCREEN`` is observation
-    noise on the public screen. So dialling jump size never moves the
-    diffusion, changing the drift model never moves a jump, and the screen's
-    noise is not the truth's. (``EVENTS`` here means data prints; the
-    ``events.py`` module is the log spine and draws nothing.)
+    noise on the regular screen refreshes; ``SCREEN_PRINT`` is the extra
+    observation forced at each print, per event, so inserting one never moves
+    a regular refresh. So dialling jump size never moves the diffusion,
+    changing the drift model never moves a jump, and the screen's noise is not
+    the truth's. (``EVENTS`` here means data prints; the ``events.py`` module
+    is the log spine and draws nothing.)
+
+    Flow is split along its own counterfactual axes. ``FLOW_ARRIVAL`` decides
+    when; ``FLOW_CLIENT`` decides who, per RFQ; ``FLOW_CLIENT_TYPE`` is one
+    uniform per roster client deciding informed type; ``FLOW_SIZE``,
+    ``FLOW_DIRECTION`` and ``FLOW_INFORMED`` are per-RFQ attributes. So the
+    size model never moves a side, and the informed share never moves who
+    called.
 
     ``scoring``, ``book`` and ``events`` consume no randomness and have no
     stream.
@@ -62,7 +71,10 @@ class Stream(StrEnum):
     JUMPS = "jumps"
     DRIFT = "drift"
     SCREEN = "screen"
+    SCREEN_PRINT = "screen_print"
     FLOW_ARRIVAL = "flow_arrival"
+    FLOW_CLIENT = "flow_client"
+    FLOW_CLIENT_TYPE = "flow_client_type"
     FLOW_SIZE = "flow_size"
     FLOW_DIRECTION = "flow_direction"
     FLOW_INFORMED = "flow_informed"

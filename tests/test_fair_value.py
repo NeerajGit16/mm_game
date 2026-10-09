@@ -26,7 +26,9 @@ from mm_game.fair_value import (
     EventMarkOut,
     FairValuePath,
     PublicView,
+    _bridge_error,
     _drift_increments,
+    _screen_corr,
     _screen_error,
     generate,
     session_sigma,
@@ -144,7 +146,7 @@ def test_drift_parameters_never_move_a_jump_or_the_diffusion():
 
 
 def test_event_count_never_moves_the_diffusion():
-    """Brief 01: dialling jump intensity must not shift the diffusion path
+    """Dialling jump intensity must not shift the diffusion path
     underneath it. A zero-event session and a two-event session on the same
     seed share every diffusion increment."""
     quiet = generate(GameConfig(max_events=0), RngStreams(7))
@@ -157,7 +159,7 @@ def test_event_count_never_moves_the_diffusion():
 @pytest.mark.parametrize(
     "hours,expected_bp",
     [
-        (24.0, 1.637),  # the brief's own figure at 90 normal vol, 2h session
+        (24.0, 1.637),  # 90 normal vol, 24h trading day, 2h session
         (6.5, 3.145),  # and at a 6.5h day -- nearly double for the same input
     ],
 )
@@ -170,7 +172,7 @@ def test_vol_round_trip(hours, expected_bp):
     enough never to flake, tight enough to catch a factor of 1.05. The errors
     this exists for are sqrt(252) = 15.9x, sqrt(24) = 4.9x, and sqrt(dt) =
     3.2x, all of which miss by an order of magnitude. The expected values are
-    the brief's numbers, computed independently in the test.
+    design figures, computed independently in the test.
     """
     cfg = GameConfig(trading_hours_per_day=hours)
     assert math.isclose(expected_session_sigma(cfg), expected_bp, rel_tol=1e-3)
@@ -183,7 +185,7 @@ def test_vol_round_trip(hours, expected_bp):
 
 
 def test_increment_variance_matches_sigma_squared_dt():
-    """The brief's test 4, as a per-step variance check with a 3% tolerance.
+    """A per-step variance check with a 3% tolerance.
     Relative SE of a sample variance over n=72,000 is sqrt(2/n) = 0.53%, so 3%
     is ~6 SE. Zero drift is checked alongside: the mean increment must be
     indistinguishable from zero, or the process has a free edge in it."""
@@ -290,7 +292,12 @@ def test_shapes_and_bounds():
         assert arr.shape == (n + 1,)
     assert path.diffusion[0] == 0.0 and path.drift[0] == 0.0 and path.relative[0] == 0.0
     assert path.values[0] == cfg.start_level
-    assert path.public.screen.shape == (n // cfg.screen_refresh_steps + 1,)
+    r = cfg.screen_refresh_steps
+    off_grid = path.event_steps[path.event_steps % r != 0]
+    assert path.public.screen_steps.shape == (n // r + 1 + off_grid.size,)
+    assert path.public.screen.shape == path.public.screen_steps.shape
+    assert path.screen_error.shape == path.public.screen_steps.shape
+    assert np.all(np.diff(path.public.screen_steps) > 0)  # sorted, unique
     assert path.event_steps.dtype.kind == "i"
     assert np.all(np.diff(path.event_steps) > 0)  # sorted, unique
     lo, hi = cfg.event_step_bounds
@@ -317,7 +324,18 @@ def test_arrays_are_read_only():
     """A frozen dataclass does not freeze array contents. An agent writing into
     the truth would corrupt every later mark-out, silently."""
     path = generate(GameConfig(), RngStreams(1))
-    for arr in (path.values, path.relative, path.diffusion, path.drift, path.event_steps, path.jump_sizes, path.public.screen, path.public.event_steps):
+    for arr in (
+        path.values,
+        path.relative,
+        path.diffusion,
+        path.drift,
+        path.event_steps,
+        path.jump_sizes,
+        path.screen_error,
+        path.public.screen,
+        path.public.screen_steps,
+        path.public.event_steps,
+    ):
         with pytest.raises(ValueError):
             arr[0] = 1
     with pytest.raises(dataclasses.FrozenInstanceError):
@@ -544,18 +562,22 @@ def test_screen_tracks_truth_through_error_and_rounding():
     centred, and with the error switched off the screen is exactly the truth
     rounded to the tick -- not the truth."""
     cfg = GameConfig()
-    r = cfg.screen_refresh_steps
     resid = np.concatenate(
-        [(p := generate(cfg, RngStreams(s))).public.screen - p.values[::r] for s in range(20)]
+        [
+            (p := generate(cfg, RngStreams(s))).public.screen - p.values[p.public.screen_steps]
+            for s in range(20)
+        ]
     )
     expected = math.sqrt(cfg.screen_noise_bp**2 + cfg.tick_size**2 / 12)
     assert math.isclose(resid.std(ddof=1), expected, rel_tol=0.10)
     assert abs(resid.mean()) < 0.1
 
     clean = generate(GameConfig(screen_noise_bp=0.0), RngStreams(6))
-    rounded_truth = clean.start_level + np.round(clean.relative[::r] / cfg.tick_size) * cfg.tick_size
+    obs = clean.public.screen_steps
+    rounded_truth = clean.start_level + np.round(clean.relative[obs] / cfg.tick_size) * cfg.tick_size
     np.testing.assert_array_equal(clean.public.screen, rounded_truth)
-    assert not np.array_equal(clean.public.screen, clean.values[::r])
+    assert not np.array_equal(clean.public.screen, clean.values[obs])
+    assert np.all(clean.screen_error == 0.0)
 
 
 @pytest.mark.parametrize("start_level", [9550.0, 9550.3, -3.25])
@@ -590,15 +612,209 @@ def test_rounded_screen_is_sticky_not_jittery():
 
 
 def test_screen_reading_is_piecewise_constant_with_known_age():
+    """Away from prints the reading sits on the refresh grid and ages up to
+    4.9 s. At a print the age resets to zero, and the next regular refresh
+    still arrives on schedule rather than five seconds after the print."""
     cfg = GameConfig()
-    pub = generate(cfg, RngStreams(6)).public
     r = cfg.screen_refresh_steps
+    seed = next(
+        s
+        for s in range(200)
+        if (ev := generate(cfg, RngStreams(s)).event_steps).size and ev[0] % r != 0
+    )
+    pub = generate(cfg, RngStreams(seed)).public
+    e = int(pub.event_steps[0])
+
     assert pub.screen_at(0) == pub.screen[0]
-    for step in (r - 1, r, r + 1, 2 * r + 7, cfg.n_steps):
+    for step in (r - 1, r, r + 1, 2 * r + 7):  # all well before the first print
         assert pub.screen_at(step) == pub.screen[step // r]
         assert math.isclose(pub.screen_age_s(step), (step % r) * cfg.dt)
     assert pub.screen_age_s(r) == 0.0
     assert math.isclose(pub.screen_age_s(r - 1), 4.9)
+
+    i_print = int(np.flatnonzero(pub.screen_steps == e)[0])
+    assert pub.screen_at(e) == pub.screen[i_print]
+    assert pub.screen_age_s(e) == 0.0
+    assert math.isclose(pub.screen_age_s(e + 1), cfg.dt)
+    next_refresh = (e // r + 1) * r
+    assert math.isclose(pub.screen_age_s(next_refresh - 1), (next_refresh - 1 - e) * cfg.dt)
+    assert pub.screen_age_s(next_refresh) == 0.0
+    assert pub.screen_at(next_refresh) == pub.screen[i_print + 1]
+
+
+# --------------------------------------------------------------------------
+# Forced screen observation at every print
+# --------------------------------------------------------------------------
+
+# Many prints close together, so forced observations are common, often share a
+# refresh interval, and the irregular gaps carry real statistical weight.
+DENSE = GameConfig(
+    session_length=600,
+    event_min_time_s=10.0,
+    event_end_margin_s=10.0,
+    event_min_gap_s=0.5,
+    max_events=40,
+)
+
+
+def showing_steps(pub: PublicView, steps: np.ndarray) -> np.ndarray:
+    """Observation step of the reading showing at each of ``steps``."""
+    return pub.screen_steps[np.searchsorted(pub.screen_steps, steps, side="right") - 1]
+
+
+def test_no_stale_window_after_a_print():
+    """Revision test 3. At every step of the session, the reading on the
+    screen was taken at or after the most recent print.
+
+    Without the forced observation, a print between refreshes leaves the
+    pre-print level showing for up to 5 s while the truth has jumped, and a
+    hedge venue priced off the screen fills at that stale level: free money
+    from the generator. The check also confirms the sampled sessions contain
+    off-grid prints, so it is not passing because every print happened to
+    land on a refresh.
+    """
+    cfg = GameConfig()
+    r = cfg.screen_refresh_steps
+    off_grid_seen = 0
+    for s in range(60):
+        path = generate(cfg, RngStreams(s))
+        pub, ev = path.public, path.event_steps
+        if ev.size == 0:
+            continue
+        steps = np.arange(path.n_steps + 1)
+        last = np.searchsorted(ev, steps, side="right") - 1
+        after = last >= 0
+        assert np.all(showing_steps(pub, steps[after]) >= ev[last[after]])
+        assert np.all(np.isin(ev, pub.screen_steps))
+        off_grid_seen += int(np.sum(ev % r != 0))
+    assert off_grid_seen > 40
+
+
+def test_screen_at_a_print_includes_the_jump():
+    """Revision test 1. The screen at a print step, minus the truth at that
+    step, is distributed like the residual at any other observation: centred,
+    with the persistent-error-plus-rounding stdev.
+
+    A stale screen would show a residual of about minus the jump, signed with
+    the print -- a mean near -3bp and a stdev near 3bp. Pooled over 600 short
+    sessions (~600 prints, nearly all off the refresh grid), the stdev of the
+    residual has a relative standard error of about 3%, so 12% is ~4 SE.
+    """
+    at_print, elsewhere = [], []
+    for s in range(600):
+        p = generate(SHORT, RngStreams(s))
+        pub = p.public
+        for e, j in zip(p.event_steps, p.jump_sizes):
+            at_print.append(np.sign(j) * (pub.screen_at(int(e)) - p.values[e]))
+        elsewhere.append(pub.screen - p.values[pub.screen_steps])
+    at_print = np.array(at_print)
+    elsewhere = np.concatenate(elsewhere)
+    expected_sd = math.sqrt(SHORT.screen_noise_bp**2 + SHORT.tick_size**2 / 12)
+    assert at_print.size > 400
+    assert abs(at_print.mean()) < 0.1
+    assert math.isclose(at_print.std(ddof=1), expected_sd, rel_tol=0.12)
+    assert math.isclose(at_print.std(ddof=1), elsewhere.std(ddof=1), rel_tol=0.12)
+
+
+def test_irregular_observations_are_ar1_with_the_actual_gap():
+    """Revision test 2. With prints forcing extra observations, consecutive
+    observations are AR(1) with coefficient exp(-gap / tau) for each actual
+    gap, and every observation keeps the stationary stdev.
+
+    Checked through standardised innovations: for each consecutive pair,
+    u = (e_k - phi e_{k-1}) / (s sqrt(1 - phi^2)) with phi from the actual gap
+    must be N(0, 1) and uncorrelated with e_{k-1}. Pooled over irregular gaps
+    only, from sessions dense with prints.
+
+    A negative control proves the check has teeth. It builds the errors the
+    way a naive implementation would -- one sequential AR(1) over the merged
+    steps using the fixed 5 s coefficient for every gap -- and confirms the
+    same check rejects it: on the short gaps a print creates, the fixed
+    coefficient injects far too much fresh noise.
+    """
+    cfg = DENSE
+    s = cfg.screen_noise_bp
+    r = cfg.screen_refresh_steps
+    phi_fixed = _screen_corr(cfg, cfg.screen_refresh_s)
+    naive_gen = np.random.default_rng(np.random.SeedSequence(7))  # test-local, not src/
+
+    def innovations(steps: np.ndarray, err: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        gaps = np.diff(steps)
+        phi = np.exp(-gaps * cfg.dt / cfg.screen_noise_corr_s)
+        u = (err[1:] - phi * err[:-1]) / (s * np.sqrt(1 - phi**2))
+        irregular = gaps != r
+        return u[irregular], err[:-1][irregular]
+
+    u, prev, u_naive, forced_err = [], [], [], []
+    shared_interval = 0
+    for seed in range(100):
+        p = generate(cfg, RngStreams(seed))
+        steps, err = p.public.screen_steps, p.screen_error
+        ui, pi = innovations(steps, err)
+        u.append(ui)
+        prev.append(pi)
+        forced_err.append(err[steps % r != 0])
+        intervals = p.event_steps[p.event_steps % r != 0] // r
+        shared_interval += int(np.sum(np.bincount(intervals) >= 2))
+
+        naive = np.empty(len(steps))
+        naive[0] = s * naive_gen.standard_normal()
+        for k in range(1, len(steps)):
+            naive[k] = phi_fixed * naive[k - 1] + s * math.sqrt(1 - phi_fixed**2) * naive_gen.standard_normal()
+        u_naive.append(innovations(steps, naive)[0])
+    u, prev, u_naive = np.concatenate(u), np.concatenate(prev), np.concatenate(u_naive)
+    forced_err = np.concatenate(forced_err)
+
+    assert u.size > 3000 and shared_interval > 50  # the multi-print branch is exercised
+    assert abs(u.mean()) < 0.06
+    assert math.isclose(u.std(ddof=1), 1.0, rel_tol=0.05)
+    assert abs(np.corrcoef(u, prev)[0, 1]) < 0.05
+    assert math.isclose(forced_err.std(ddof=1), s, rel_tol=0.08)
+    assert u_naive.std(ddof=1) > 1.5  # the naive generator fails the same check
+
+
+def test_bridge_reproduces_the_ou_covariance():
+    """The bridge formula, checked against the process it claims to sample.
+    Draw a left value, a right value 5 s later, and a bridged value 1.3 s
+    after the left; the empirical covariance of the triple must match
+    s^2 exp(-|t_i - t_j| / tau). Also the forward step with no right
+    neighbour, and the white-screen limit tau = 0."""
+    cfg = GameConfig()
+    s, tau = cfg.screen_noise_bp, cfg.screen_noise_corr_s
+    gen = np.random.default_rng(np.random.SeedSequence(2024))  # test-local, not src/
+    t1, t2 = 1.3, 3.7
+    n = 40_000
+    za, zb, zm = gen.standard_normal((3, n))
+    a = s * za
+    rho = math.exp(-(t1 + t2) / tau)
+    b = rho * a + s * math.sqrt(1 - rho**2) * zb
+    m = np.array([_bridge_error(cfg, a[i], t1, b[i], t2, zm[i]) for i in range(n)])
+    times = np.array([0.0, t1, t1 + t2])
+    expected = s**2 * np.exp(-np.abs(times[:, None] - times[None, :]) / tau)
+    np.testing.assert_allclose(np.cov(np.vstack([a, m, b])), expected, atol=0.006)
+
+    fwd = np.array([_bridge_error(cfg, a[i], t1, None, 0.0, zm[i]) for i in range(n)])
+    np.testing.assert_allclose(np.cov(a, fwd), s**2 * np.array([[1, math.exp(-t1 / tau)], [math.exp(-t1 / tau), 1]]), atol=0.006)
+
+    white = GameConfig(screen_noise_corr_s=0.0)
+    w = np.array([_bridge_error(white, a[i], t1, b[i], t2, zm[i]) for i in range(n)])
+    assert abs(np.corrcoef(a, w)[0, 1]) < 0.02 and math.isclose(w.std(), s, rel_tol=0.02)
+
+
+def test_forced_observations_never_move_a_regular_refresh():
+    """Inserting a print's observation leaves every regular 5 s reading's
+    error bit-identical, and the regular errors are exactly the SCREEN
+    substream's AR(1). So the SCREEN draw count is a function of config
+    alone, and changing the calendar -- count, bounds, gap -- never re-rolls
+    the screen at a refresh. A sequential AR(1) over the merged steps would
+    shift every refresh after the first off-grid print."""
+    r = GameConfig().screen_refresh_steps
+    for seed in range(10):
+        quiet = generate(GameConfig(max_events=0), RngStreams(seed))
+        busy = generate(GameConfig(max_events=2), RngStreams(seed))
+        regular = busy.public.screen_steps % r == 0
+        np.testing.assert_array_equal(busy.screen_error[regular], quiet.screen_error)
+        np.testing.assert_array_equal(quiet.screen_error, screen_errors(GameConfig(), range(seed, seed + 1))[0])
 
 
 def test_screen_noise_never_moves_the_truth():
@@ -618,8 +834,9 @@ def test_public_view_carries_no_truth():
     pub = path.public
     assert isinstance(pub, PublicView)
     fields = {f.name for f in dataclasses.fields(PublicView)}
-    assert fields == {"n_steps", "dt", "refresh_steps", "event_steps", "screen"}
-    assert not any(hasattr(pub, name) for name in ("values", "relative", "jump_sizes", "drift_windows", "diffusion", "drift"))
+    assert fields == {"n_steps", "dt", "refresh_steps", "event_steps", "screen_steps", "screen"}
+    hidden = ("values", "relative", "jump_sizes", "drift_windows", "diffusion", "drift", "screen_error")
+    assert not any(hasattr(pub, name) for name in hidden)
     assert not hasattr(pub, "lookahead")
     # Timing is public; outcome is not.
     np.testing.assert_array_equal(pub.event_steps, path.event_steps)

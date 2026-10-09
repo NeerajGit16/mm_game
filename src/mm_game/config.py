@@ -133,6 +133,64 @@ class GameConfig:
     # and must not exceed the session.
     markout_horizons_s: tuple[float, ...] = (10.0, 60.0, 300.0)
 
+    # -- Flow: arrivals --------------------------------------------------------
+    # Homogeneous Poisson, as a per-step Bernoulli at rate * dt on the grid.
+    # ~200 RFQs in a two-hour session. Volume does not rise into prints.
+    rfq_rate_per_hour: float = 100.0
+
+    # -- Flow: roster ----------------------------------------------------------
+    # A named roster per session, with explicit counts per visible category;
+    # see SESSION_PRESETS for the 30/60/120-minute values. Client ids run
+    # hedge funds first, then real money, then corporates.
+    n_hedge_funds: int = 6
+    n_real_money: int = 6
+    n_corporates: int = 4
+    # P(informed type | category). One uniform per client is compared against
+    # these, so raising one only adds informed clients. Defaults give an
+    # expected informed share of ~25% on every preset, with no category at 0
+    # or 1: the label sets a prior and flow confirms or refutes it. Validation
+    # allows [0, 1] so "sweep the informed share from 0 to 1" stays
+    # expressible as an experiment.
+    informed_prob_hedge_fund: float = 0.50
+    informed_prob_real_money: float = 0.15
+    informed_prob_corporate: float = 0.05
+    # Weight on informed-type clients in client assignment inside drift
+    # windows. Built now and inert at 1.0: enabling it later is a parameter
+    # change, but building it later would move which client each in-window
+    # RFQ belongs to. Above 1.0 it also makes client assignment depend on
+    # hidden types, which is the point of it.
+    informed_activity_multiplier: float = 1.0
+
+    # -- Flow: informed signal -------------------------------------------------
+    # An informed client sees the print's direction correctly with
+    # probability informed_accuracy (q), and its magnitude times a lognormal
+    # error of log-sd informed_signal_noise -- they know roughly how much.
+    # Kept distinct from drift_prob_agree: if q equalled the crowd's 0.60,
+    # "informed" would mean nothing.
+    informed_accuracy: float = 0.80
+    informed_signal_noise: float = 0.25
+
+    # -- Flow: size ------------------------------------------------------------
+    # Uninformed: lognormal lots, median 10, log-sd 0.9 (90th pct ~32, 99th
+    # ~80), integer, at least 1, capped. Informed: the same base draw times a
+    # factor |signal| / informed_size_ref_bp clipped to [min, max] -- ~1x for
+    # a 1.5bp signal, ~3x at 4.5bp, ~2x on average.
+    size_median_lots: float = 10.0
+    size_log_sd: float = 0.9
+    size_cap_lots: int = 100
+    informed_size_ref_bp: float = 1.5
+    informed_size_factor_min: float = 1.0
+    informed_size_factor_max: float = 3.0
+
+    # -- Flow: direction -------------------------------------------------------
+    # Uninformed side: a fair coin outside drift windows, this probability
+    # toward the drift inside them. Separate from drift_prob_agree though both
+    # default to 0.60. One-way RFQs come from both populations, more often
+    # from informed, so a one-way inquiry is evidence, never proof.
+    crowd_drift_tilt: float = 0.60
+    one_way_prob_uninformed: float = 0.05
+    one_way_prob_informed: float = 0.10
+
     def __post_init__(self) -> None:
         # `not x > 0` rather than `x <= 0`: the former also rejects NaN.
         if not self.tick_size > 0:
@@ -265,6 +323,62 @@ class GameConfig:
                 )
             _whole_steps(h, self.dt, f"markout horizon {h}")
 
+        # Flow: arrivals. The per-step Bernoulli probability must be a
+        # probability; it should also be small for the Poisson reading to hold.
+        if not (math.isfinite(self.rfq_rate_per_hour) and self.rfq_rate_per_hour >= 0):
+            raise ValueError(
+                f"rfq_rate_per_hour must be finite and non-negative, got {self.rfq_rate_per_hour}"
+            )
+        if self.rfq_arrival_prob > 1:
+            raise ValueError(
+                f"rfq_rate_per_hour * dt is {self.rfq_arrival_prob} per step; must be <= 1"
+            )
+
+        # Flow: roster.
+        for name in ("n_hedge_funds", "n_real_money", "n_corporates"):
+            if not getattr(self, name) >= 0:
+                raise ValueError(f"{name} must be non-negative, got {getattr(self, name)}")
+        if not self.n_clients >= 1:
+            raise ValueError("the roster must have at least one client")
+        for name in ("informed_prob_hedge_fund", "informed_prob_real_money", "informed_prob_corporate"):
+            if not 0 <= getattr(self, name) <= 1:
+                raise ValueError(f"{name} must be a probability, got {getattr(self, name)}")
+        if not (math.isfinite(self.informed_activity_multiplier) and self.informed_activity_multiplier > 0):
+            raise ValueError(
+                "informed_activity_multiplier must be finite and positive, got "
+                f"{self.informed_activity_multiplier}"
+            )
+
+        # Flow: informed signal.
+        if not 0 <= self.informed_accuracy <= 1:
+            raise ValueError(f"informed_accuracy must be a probability, got {self.informed_accuracy}")
+        if not (math.isfinite(self.informed_signal_noise) and self.informed_signal_noise >= 0):
+            raise ValueError(
+                f"informed_signal_noise must be finite and non-negative, got {self.informed_signal_noise}"
+            )
+
+        # Flow: size.
+        if not (math.isfinite(self.size_median_lots) and self.size_median_lots > 0):
+            raise ValueError(f"size_median_lots must be finite and positive, got {self.size_median_lots}")
+        if not (math.isfinite(self.size_log_sd) and self.size_log_sd >= 0):
+            raise ValueError(f"size_log_sd must be finite and non-negative, got {self.size_log_sd}")
+        if not self.size_cap_lots >= 1:
+            raise ValueError(f"size_cap_lots must be at least 1, got {self.size_cap_lots}")
+        if not (math.isfinite(self.informed_size_ref_bp) and self.informed_size_ref_bp > 0):
+            raise ValueError(
+                f"informed_size_ref_bp must be finite and positive, got {self.informed_size_ref_bp}"
+            )
+        if not 0 < self.informed_size_factor_min <= self.informed_size_factor_max < math.inf:
+            raise ValueError(
+                "informed size factors must satisfy 0 < min <= max < inf, got "
+                f"{self.informed_size_factor_min} and {self.informed_size_factor_max}"
+            )
+
+        # Flow: direction.
+        for name in ("crowd_drift_tilt", "one_way_prob_uninformed", "one_way_prob_informed"):
+            if not 0 <= getattr(self, name) <= 1:
+                raise ValueError(f"{name} must be a probability, got {getattr(self, name)}")
+
     @property
     def n_steps(self) -> int:
         """Number of fair value grid steps in the session.
@@ -296,6 +410,51 @@ class GameConfig:
     @property
     def event_min_gap_steps(self) -> int:
         return round(self.event_min_gap_s / self.dt)
+
+    @property
+    def rfq_arrival_prob(self) -> float:
+        """Per-step Bernoulli probability of an RFQ: rate * dt."""
+        return self.rfq_rate_per_hour * self.dt / 3600.0
+
+    @property
+    def n_clients(self) -> int:
+        return self.n_hedge_funds + self.n_real_money + self.n_corporates
+
+    @property
+    def expected_informed_share(self) -> float:
+        """Expected fraction of the roster that is informed type."""
+        expected = (
+            self.n_hedge_funds * self.informed_prob_hedge_fund
+            + self.n_real_money * self.informed_prob_real_money
+            + self.n_corporates * self.informed_prob_corporate
+        )
+        return expected / self.n_clients
+
+    @classmethod
+    def for_session(cls, minutes: int, **overrides: object) -> GameConfig:
+        """The config for a 30, 60 or 120-minute session.
+
+        Presets are explicit values, not a formula: each sets session length,
+        the maximum number of prints the event bounds can fit, and the roster
+        counts per category. Roster size holds ~8-12 RFQs per client, which is
+        what makes identity learnable; a 16-client roster in 30 minutes would
+        be ~3 per client and effectively anonymous. Any field can still be
+        overridden by keyword.
+        """
+        if minutes not in SESSION_PRESETS:
+            raise ValueError(f"no preset for {minutes} minutes; have {sorted(SESSION_PRESETS)}")
+        return cls(**{**SESSION_PRESETS[minutes], **overrides})
+
+
+# Session-length presets. Explicit per preset so every value is visible and
+# diffable. Expected informed share at the default category probabilities:
+# 30 min 25.0%, 60 min 26.0%, 120 min 25.6%. A 30-minute session fits one
+# print at most under the event bounds (window 15-20 min), an hour two.
+SESSION_PRESETS: dict[int, dict[str, int]] = {
+    30: {"session_length": 1800, "max_events": 1, "n_hedge_funds": 2, "n_real_money": 3, "n_corporates": 1},
+    60: {"session_length": 3600, "max_events": 2, "n_hedge_funds": 4, "n_real_money": 3, "n_corporates": 3},
+    120: {"session_length": 7200, "max_events": 2, "n_hedge_funds": 6, "n_real_money": 6, "n_corporates": 4},
+}
 
 
 DEFAULT_CONFIG = GameConfig()

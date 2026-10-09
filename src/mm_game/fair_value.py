@@ -117,31 +117,41 @@ class EventMarkOut:
 class PublicView:
     """What a participant may see: the screen and the event calendar.
 
-    Holds no reference to the truth. Screen readings are stored per refresh,
-    not per step, so the age of the reading a participant is looking at falls
-    out of the step arithmetic. Every reading is a whole number of ticks from
-    the session's start level: the screen quotes in ticks, as a screen does.
+    "Public" means public *at its step*: the engine reveals each reading when
+    its step arrives. The calendar is the exception, public in advance, since
+    the countdown is on the info monitor.
+
+    Holds no reference to the truth. Screen readings are stored per
+    observation, not per step: one at every regular refresh plus one forced at
+    every print, so ``screen_steps`` is irregular and the age of the reading a
+    participant is looking at is ``step - screen_steps[i]``. Every reading is
+    a whole number of ticks from the session's start level: the screen quotes
+    in ticks, as a screen does.
     """
 
     n_steps: int
     dt: float
     refresh_steps: int
-    event_steps: np.ndarray  # public: the countdown is on the info monitor
-    screen: np.ndarray  # one reading per refresh, at steps 0, r, 2r, ...
+    event_steps: np.ndarray  # public in advance
+    screen_steps: np.ndarray  # sorted observation steps: 0, r, 2r, ... plus each print
+    screen: np.ndarray  # one reading per observation step
 
     def _check_step(self, step: int) -> None:
         if not 0 <= step <= self.n_steps:
             raise ValueError(f"step must be in [0, {self.n_steps}], got {step}")
 
-    def screen_at(self, step: int) -> float:
-        """The screen mid showing at ``step``: the latest refresh at or before it."""
+    def _showing(self, step: int) -> int:
+        """Index of the latest observation at or before ``step``."""
         self._check_step(step)
-        return float(self.screen[step // self.refresh_steps])
+        return int(np.searchsorted(self.screen_steps, step, side="right")) - 1
+
+    def screen_at(self, step: int) -> float:
+        """The screen mid showing at ``step``: the latest observation at or before it."""
+        return float(self.screen[self._showing(step)])
 
     def screen_age_s(self, step: int) -> float:
         """Seconds since the reading showing at ``step`` was taken."""
-        self._check_step(step)
-        return (step % self.refresh_steps) * self.dt
+        return (step - int(self.screen_steps[self._showing(step)])) * self.dt
 
     def steps_to_next_event(self, step: int) -> int | None:
         """Steps until the next print strictly after ``step``; None if none."""
@@ -182,6 +192,10 @@ class FairValuePath:
     event_steps: np.ndarray  # (n_events,) sorted, unique, in [1, n_steps]
     jump_sizes: np.ndarray  # (n_events,) signed bp. Hidden.
     drift_windows: tuple[DriftWindow, ...]
+    # Unrounded observation error at each public.screen_steps entry. Hidden:
+    # with the truth it reconstructs the screen before rounding, and the
+    # competitor pricing in fills shares this error.
+    screen_error: np.ndarray
     public: PublicView
 
     @property
@@ -375,13 +389,114 @@ def _screen_error(config: GameConfig, z: np.ndarray) -> np.ndarray:
     the truth.
     """
     s = config.screen_noise_bp
-    phi = math.exp(-config.screen_refresh_s / config.screen_noise_corr_s) if config.screen_noise_corr_s > 0 else 0.0
+    phi = _screen_corr(config, config.screen_refresh_s)
     innovation = s * math.sqrt(1.0 - phi * phi)
     err = np.empty(len(z))
     err[0] = s * z[0]
     for k in range(1, len(z)):
         err[k] = phi * err[k - 1] + innovation * z[k]
     return err
+
+
+def _screen_corr(config: GameConfig, seconds: float) -> float:
+    """Correlation of the screen error across ``seconds``: exp(-t / tau).
+    A correlation time of 0 is the white screen: zero correlation at any gap."""
+    tau = config.screen_noise_corr_s
+    return math.exp(-seconds / tau) if tau > 0 else 0.0
+
+
+def _bridge_error(
+    config: GameConfig, left_err: float, t_left: float, right_err: float | None, t_right: float, z: float
+) -> float:
+    """The screen error at an instant between two known observations.
+
+    The error is a stationary Ornstein-Uhlenbeck process sampled at the
+    observation times, and that process is Markov, so the value at an
+    intermediate instant given everything else depends only on its two
+    neighbours. With ``rho1 = exp(-t_left / tau)`` and
+    ``rho2 = exp(-t_right / tau)``, the conditional law is Gaussian with
+
+        mean = (a * rho1 * (1 - rho2^2) + b * rho2 * (1 - rho1^2)) / (1 - rho1^2 rho2^2)
+        var  = s^2 * (1 - rho1^2) * (1 - rho2^2) / (1 - rho1^2 rho2^2)
+
+    and with no right neighbour it is the forward step N(rho1 * a,
+    s^2 (1 - rho1^2)). Sampling this way gives the observations jointly the
+    law of the OU at their actual times -- so consecutive observations are
+    AR(1) with coefficient exp(-gap / tau) for each actual gap -- while the
+    regular refreshes, drawn first, are untouched by the insertion.
+    """
+    s = config.screen_noise_bp
+    rho1 = _screen_corr(config, t_left)
+    if right_err is None:
+        return rho1 * left_err + s * math.sqrt(1.0 - rho1 * rho1) * z
+    rho2 = _screen_corr(config, t_right)
+    denom = 1.0 - rho1 * rho1 * rho2 * rho2
+    mean = (left_err * rho1 * (1.0 - rho2 * rho2) + right_err * rho2 * (1.0 - rho1 * rho1)) / denom
+    var = s * s * (1.0 - rho1 * rho1) * (1.0 - rho2 * rho2) / denom
+    return mean + math.sqrt(var) * z
+
+
+def _screen_observations(
+    config: GameConfig, rng: RngStreams, event_steps: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Observation steps and the persistent screen error at each.
+
+    Regular refreshes at 0, r, 2r, ... are drawn exactly as before, from the
+    instrument's ``SCREEN`` substream, one normal per refresh. Then every
+    print that does not land on a refresh gets a forced observation at its
+    own step, so the screen shows the print the moment it happens: without
+    it, a print between refreshes leaves the pre-print level on the screen for
+    up to ``screen_refresh_s``, and a hedge venue priced off the screen would
+    fill at that stale level -- free money from the generator.
+
+    The forced observation is bridged between its neighbours rather than
+    folded into a sequential recursion, for two reasons. A sequential AR(1)
+    over the merged steps would make the number of ``SCREEN`` draws depend on
+    the random calendar, and inserting a print would shift the error at every
+    regular refresh after it. Bridging leaves every regular refresh
+    bit-identical whatever the calendar, keeps the ``SCREEN`` draw count a
+    function of config alone, and takes each forced observation's one normal
+    from ``SCREEN_PRINT`` keyed on event ordinal -- the same per-event pattern
+    as ``JUMPS`` and ``DRIFT``. The joint law is identical to the sequential
+    one: the OU sampled at the merged times.
+    """
+    r = config.screen_refresh_steps
+    grid = np.arange(config.n_steps // r + 1) * r
+    z = rng.substream(Stream.SCREEN, INSTRUMENT_ORDINAL).standard_normal(len(grid))
+    grid_err = _screen_error(config, z)
+
+    forced_steps: list[int] = []
+    forced_err: list[float] = []
+    for i, e in enumerate(int(x) for x in event_steps):
+        if e % r == 0:
+            continue  # the print lands on a regular refresh, already observed
+        g = e // r
+        left_step, left_err = int(grid[g]), float(grid_err[g])
+        if forced_steps and forced_steps[-1] > left_step:
+            # An earlier print in the same refresh interval is the nearer
+            # left neighbour; conditioning on it keeps the chain Markov.
+            left_step, left_err = forced_steps[-1], forced_err[-1]
+        if g + 1 < len(grid):
+            right_step, right_err = int(grid[g + 1]), float(grid_err[g + 1])
+        else:
+            right_step, right_err = e, None  # print after the last refresh
+        zi = float(rng.substream(Stream.SCREEN_PRINT, i).standard_normal())
+        forced_steps.append(e)
+        forced_err.append(
+            _bridge_error(
+                config,
+                left_err,
+                (e - left_step) * config.dt,
+                right_err,
+                (right_step - e) * config.dt,
+                zi,
+            )
+        )
+
+    steps = np.concatenate((grid, np.array(forced_steps, dtype=np.int64)))
+    errs = np.concatenate((grid_err, np.array(forced_err)))
+    order = np.argsort(steps, kind="stable")
+    return steps[order].astype(np.int64), errs[order]
 
 
 def _cumulative(increments: np.ndarray) -> np.ndarray:
@@ -423,27 +538,25 @@ def generate(config: GameConfig, rng: RngStreams) -> FairValuePath:
     relative = diffusion + drift + jumps
     values = config.start_level + relative
 
-    # Screen: the truth at each refresh step plus a persistent observation
-    # error, from the instrument's own observation generator, then rounded to
-    # the tick. Drawn up front like everything else; one standard normal per
-    # refresh whatever the correlation time, so the draw count is a function
-    # of config alone. Rounding happens after the error and in level-relative
-    # space, so every reading is a whole number of ticks from start_level
-    # whatever the level is, and the invariance to start_level stays exact.
-    # The persistent error underneath is what makes the rounded screen sit on
-    # one tick for a while and then flip, rather than jitter between ticks.
-    r = config.screen_refresh_steps
-    obs_steps = np.arange(n // r + 1) * r
-    z = rng.substream(Stream.SCREEN, INSTRUMENT_ORDINAL).standard_normal(len(obs_steps))
-    observed = relative[obs_steps] + _screen_error(config, z)
+    # Screen: the truth at each observation step plus a persistent
+    # observation error, then rounded to the tick. Observations are every
+    # regular refresh plus a forced one at each print, so there is no stale
+    # window after a print. Rounding happens after the error and in
+    # level-relative space, so every reading is a whole number of ticks from
+    # start_level whatever the level is, and the invariance to start_level
+    # stays exact. The persistent error underneath is what makes the rounded
+    # screen sit on one tick for a while and then flip, rather than jitter.
+    obs_steps, screen_err = _screen_observations(config, rng, event_steps)
+    observed = relative[obs_steps] + screen_err
     screen = config.start_level + np.round(observed / config.tick_size) * config.tick_size
 
     event_steps = _freeze(event_steps)
     public = PublicView(
         n_steps=n,
         dt=config.dt,
-        refresh_steps=r,
+        refresh_steps=config.screen_refresh_steps,
         event_steps=event_steps,
+        screen_steps=_freeze(obs_steps),
         screen=_freeze(screen),
     )
     return FairValuePath(
@@ -456,5 +569,6 @@ def generate(config: GameConfig, rng: RngStreams) -> FairValuePath:
         event_steps=event_steps,
         jump_sizes=_freeze(jump_sizes),
         drift_windows=tuple(windows),
+        screen_error=_freeze(screen_err),
         public=public,
     )
