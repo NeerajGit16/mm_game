@@ -193,6 +193,56 @@ class GameConfig:
     one_way_prob_uninformed: float = 0.05
     one_way_prob_informed: float = 0.10
 
+    # -- Fills: competing dealers ----------------------------------------------
+    # Three dealers sharing one model. Each mid is the truth plus a share of
+    # the screen's error (dealers watch the same screen, so when it is a tick
+    # rich the street leans rich) plus the dealer's own persistent error. Both
+    # components persist for minutes, so cover calibrates but cannot be
+    # averaged down to the truth. Each quotes mid +/- a half-spread, rounded
+    # to the nearest tick, widening for size and around prints -- public
+    # information only. Dealers never adapt during a session.
+    n_competitors: int = 3
+    competitor_half_spread_ticks: float = 1.0
+    competitor_size_widen_ticks: float = 1.0  # extra half-spread per 100 lots
+    competitor_print_widen: float = 1.0  # half-spread x (1 + this) at a print
+    competitor_print_window_s: float = 120.0  # widening tapers to 0 this far out
+    competitor_screen_weight: float = 0.75
+    competitor_error_bp: float = 0.15
+    competitor_error_corr_s: float = 120.0
+
+    # -- Fills: client limits --------------------------------------------------
+    # Every RFQ carries the worst price the client accepts on their side.
+    # Uninformed: the screen plus a tolerance, lognormal around about a tick,
+    # occasionally ~3, growing mildly with size: median 1.5 ticks, ~16% below
+    # one tick, ~4% above three. Informed: at least that, and
+    # up to the screen plus a share of their expected move -- they give up
+    # roughly half their edge, so a wide fill is evidence, never proof.
+    client_tolerance_ticks: float = 1.5
+    client_tolerance_log_sd: float = 0.4
+    client_tolerance_size_growth: float = 0.5  # tolerance x (1 + this * size / 100)
+    informed_edge_given_up: float = 0.5
+
+    # -- Hedge venue and closing -----------------------------------------------
+    # Trade any size at the tick-rounded screen plus a per-lot cost that grows
+    # with size and widens around prints. Priced off the screen, never the
+    # truth. Validation proves the per-lot cost exceeds the furthest a
+    # competitor quote can sit from its own mid -- half-spread plus half a
+    # tick of rounding -- by hedge_margin_ticks at every size up to the cap
+    # and every distance from a print, so quote-fill-hedge is never riskless
+    # by construction. The closing liquidation is the same cost times
+    # close_liquidation_multiplier: the hedge you didn't do, at a worse time.
+    hedge_cost_ticks: float = 2.0
+    hedge_impact_ticks: float = 1.0  # extra per-lot cost per 100 lots
+    hedge_print_widen: float = 1.0
+    hedge_print_window_s: float = 120.0
+    hedge_margin_ticks: float = 0.5
+    close_liquidation_multiplier: float = 1.5
+
+    # -- Position limit --------------------------------------------------------
+    # Hard limit either way, twice the ticket cap. A quote side whose fill
+    # would breach it is blocked; hedges count toward it and are clipped.
+    position_limit_lots: int = 200
+
     def __post_init__(self) -> None:
         # `not x > 0` rather than `x <= 0`: the former also rejects NaN.
         if not self.tick_size > 0:
@@ -390,6 +440,72 @@ class GameConfig:
             if not 0 <= getattr(self, name) <= 1:
                 raise ValueError(f"{name} must be a probability, got {getattr(self, name)}")
 
+        # Fills: competitors.
+        if not self.n_competitors >= 1:
+            raise ValueError(f"n_competitors must be at least 1, got {self.n_competitors}")
+        if not (math.isfinite(self.competitor_half_spread_ticks) and self.competitor_half_spread_ticks >= 0.5):
+            # Below half a tick, rounding to the nearest tick could put a
+            # dealer's bid at or above its own mid.
+            raise ValueError(
+                "competitor_half_spread_ticks must be at least 0.5, got "
+                f"{self.competitor_half_spread_ticks}"
+            )
+        for name in (
+            "competitor_size_widen_ticks",
+            "competitor_print_widen",
+            "competitor_print_window_s",
+            "competitor_error_bp",
+            "competitor_error_corr_s",
+            "client_tolerance_log_sd",
+            "client_tolerance_size_growth",
+            "hedge_impact_ticks",
+            "hedge_print_widen",
+            "hedge_print_window_s",
+            "hedge_margin_ticks",
+        ):
+            value = getattr(self, name)
+            if not (math.isfinite(value) and value >= 0):
+                raise ValueError(f"{name} must be finite and non-negative, got {value}")
+        if not 0 <= self.competitor_screen_weight <= 1:
+            raise ValueError(
+                f"competitor_screen_weight must be in [0, 1], got {self.competitor_screen_weight}"
+            )
+
+        # Fills: client limits.
+        if not (math.isfinite(self.client_tolerance_ticks) and self.client_tolerance_ticks > 0):
+            raise ValueError(
+                f"client_tolerance_ticks must be finite and positive, got {self.client_tolerance_ticks}"
+            )
+        if not 0 <= self.informed_edge_given_up <= 1:
+            raise ValueError(
+                f"informed_edge_given_up must be in [0, 1], got {self.informed_edge_given_up}"
+            )
+
+        # Hedge venue and closing.
+        if not (math.isfinite(self.hedge_cost_ticks) and self.hedge_cost_ticks > 0):
+            raise ValueError(f"hedge_cost_ticks must be finite and positive, got {self.hedge_cost_ticks}")
+        if not (math.isfinite(self.close_liquidation_multiplier) and self.close_liquidation_multiplier >= 1):
+            raise ValueError(
+                "close_liquidation_multiplier must be at least 1, got "
+                f"{self.close_liquidation_multiplier}"
+            )
+        shortfall = self.hedge_margin_shortfall()
+        if shortfall is not None:
+            size, seconds, gap = shortfall
+            raise ValueError(
+                "hedge cost must exceed the furthest competitor quote by "
+                f"hedge_margin_ticks={self.hedge_margin_ticks} everywhere; at size {size} "
+                f"and {seconds}s from a print the excess is {gap:.4f} ticks"
+            )
+
+        # Position limit.
+        if not self.position_limit_lots >= self.size_cap_lots:
+            # Below the ticket cap, a single fill from flat could breach it.
+            raise ValueError(
+                f"position_limit_lots ({self.position_limit_lots}) must be at least "
+                f"size_cap_lots ({self.size_cap_lots})"
+            )
+
     @property
     def n_steps(self) -> int:
         """Number of fair value grid steps in the session.
@@ -427,6 +543,62 @@ class GameConfig:
         """The largest print count with non-zero probability: the one the
         placement check has to prove fits."""
         return max(k for k, p in enumerate(self.event_count_probs) if p > 0)
+
+    # -- Spread and cost functions ---------------------------------------------
+    # Defined here, on the parameters, so validation, the competitors and the
+    # hedge venue all use one definition. Arguments are public: the ticket
+    # size and the distance in seconds to the nearest print (inf if none).
+
+    @staticmethod
+    def _proximity(seconds_to_print: float, window_s: float) -> float:
+        """1 at a print, tapering linearly to 0 at ``window_s`` either side."""
+        if window_s <= 0 or not math.isfinite(seconds_to_print):
+            return 0.0
+        return max(0.0, 1.0 - abs(seconds_to_print) / window_s)
+
+    def competitor_half_spread_ticks_at(self, size: float, seconds_to_print: float) -> float:
+        """A dealer's half-spread before rounding: base plus size, times the
+        widening around a print."""
+        base = self.competitor_half_spread_ticks + self.competitor_size_widen_ticks * size / 100.0
+        widen = 1.0 + self.competitor_print_widen * self._proximity(seconds_to_print, self.competitor_print_window_s)
+        return base * widen
+
+    def competitor_max_quote_distance_ticks(self, size: float, seconds_to_print: float) -> float:
+        """The furthest a dealer's rounded quote can sit from its own mid:
+        the half-spread plus half a tick of rounding to the nearest tick."""
+        return self.competitor_half_spread_ticks_at(size, seconds_to_print) + 0.5
+
+    def hedge_cost_ticks_at(self, size: float, seconds_to_print: float) -> float:
+        """Per-lot hedge cost: base plus impact growing with size, times the
+        widening around a print."""
+        base = self.hedge_cost_ticks + self.hedge_impact_ticks * size / 100.0
+        widen = 1.0 + self.hedge_print_widen * self._proximity(seconds_to_print, self.hedge_print_window_s)
+        return base * widen
+
+    def hedge_margin_shortfall(self) -> tuple[float, float, float] | None:
+        """Where hedging is not dearer than the furthest competitor quote by
+        ``hedge_margin_ticks``, if anywhere: (size, seconds, excess), else None.
+
+        Exact, not sampled. For a fixed distance both functions are linear in
+        size, so the excess is smallest at size 1 or at the cap; for a fixed
+        size both are piecewise linear in distance with kinks only at the
+        print and at each widening window's edge, so the excess is smallest at
+        one of those points or far away. Checking that handful of corners
+        covers every size and every distance.
+        """
+        distances = (0.0, self.competitor_print_window_s, self.hedge_print_window_s, math.inf)
+        corners = [
+            (
+                size,
+                seconds,
+                self.hedge_cost_ticks_at(size, seconds)
+                - self.competitor_max_quote_distance_ticks(size, seconds),
+            )
+            for size in (1.0, float(self.size_cap_lots))
+            for seconds in distances
+        ]
+        worst = min(corners, key=lambda c: c[2])
+        return worst if worst[2] < self.hedge_margin_ticks - 1e-12 else None
 
     @property
     def rfq_arrival_prob(self) -> float:

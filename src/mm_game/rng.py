@@ -62,6 +62,14 @@ class Stream(StrEnum):
     size model never moves a side, and the informed share never moves who
     called.
 
+    Fills has two. ``COMPETITION`` is each competing dealer's persistent
+    pricing error, a time process keyed on dealer ordinal, so changing the
+    arrival rate never re-rolls the street. ``ACCEPTANCE`` is the client's
+    limit and the tie-break, per RFQ ordinal, deliberately not shared with
+    anything the player's quoting touches: "same session, quote differently"
+    only stays clean if RFQ k's acceptance draws are identical across runs and
+    only the price they are compared against moves.
+
     ``scoring``, ``book`` and ``events`` consume no randomness and have no
     stream.
     """
@@ -79,6 +87,7 @@ class Stream(StrEnum):
     FLOW_DIRECTION = "flow_direction"
     FLOW_INFORMED = "flow_informed"
     COMPETITION = "competition"
+    ACCEPTANCE = "acceptance"
     AGENTS = "agents"
 
 

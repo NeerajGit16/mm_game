@@ -64,6 +64,15 @@ def test_defaults_match_the_instrument_spec():
     assert (cfg.size_median_lots, cfg.size_log_sd, cfg.size_cap_lots) == (10.0, 0.9, 100)
     assert (cfg.informed_size_ref_bp, cfg.informed_size_factor_min, cfg.informed_size_factor_max) == (1.5, 1.0, 3.0)
     assert (cfg.crowd_drift_tilt, cfg.one_way_prob_uninformed, cfg.one_way_prob_informed) == (0.60, 0.05, 0.10)
+    assert cfg.n_competitors == 3
+    assert (cfg.competitor_half_spread_ticks, cfg.competitor_size_widen_ticks) == (1.0, 1.0)
+    assert (cfg.competitor_print_widen, cfg.competitor_print_window_s) == (1.0, 120.0)
+    assert (cfg.competitor_screen_weight, cfg.competitor_error_bp, cfg.competitor_error_corr_s) == (0.75, 0.15, 120.0)
+    assert (cfg.client_tolerance_ticks, cfg.client_tolerance_log_sd, cfg.client_tolerance_size_growth) == (1.5, 0.4, 0.5)
+    assert cfg.informed_edge_given_up == 0.5
+    assert (cfg.hedge_cost_ticks, cfg.hedge_impact_ticks, cfg.hedge_margin_ticks) == (2.0, 1.0, 0.5)
+    assert (cfg.hedge_print_widen, cfg.hedge_print_window_s) == (1.0, 120.0)
+    assert (cfg.close_liquidation_multiplier, cfg.position_limit_lots) == (1.5, 200)
 
 
 @pytest.mark.parametrize(
@@ -289,6 +298,20 @@ def test_round_trips_through_json_exactly():
         ("crowd_drift_tilt", 1.2),
         ("one_way_prob_uninformed", -0.01),
         ("one_way_prob_informed", float("nan")),
+        ("n_competitors", 0),
+        ("competitor_half_spread_ticks", 0.4),  # a rounded bid could sit at or above the mid
+        ("competitor_size_widen_ticks", -1.0),
+        ("competitor_screen_weight", 1.5),
+        ("competitor_error_bp", -0.1),
+        ("competitor_error_corr_s", float("nan")),
+        ("client_tolerance_ticks", 0.0),
+        ("client_tolerance_log_sd", -0.1),
+        ("informed_edge_given_up", 1.5),
+        ("hedge_cost_ticks", 0.0),
+        ("hedge_margin_ticks", -0.1),
+        ("hedge_cost_ticks", 1.5),  # breaches the margin over the competitor quotes
+        ("close_liquidation_multiplier", 0.9),  # holding to the bell would be cheaper than hedging
+        ("position_limit_lots", 50),  # one ticket from flat could breach it
     ],
 )
 def test_bad_values_rejected(field, bad):

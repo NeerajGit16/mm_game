@@ -153,6 +153,15 @@ class PublicView:
         """Seconds since the reading showing at ``step`` was taken."""
         return (step - int(self.screen_steps[self._showing(step)])) * self.dt
 
+    def seconds_to_nearest_print(self, step: int) -> float:
+        """Seconds to the nearest print before or after ``step``; inf if the
+        session has none. Public: the calendar is on the info monitor, and
+        dealers and the hedge venue widen on it."""
+        self._check_step(step)
+        if self.event_steps.size == 0:
+            return math.inf
+        return float(np.min(np.abs(self.event_steps - step))) * self.dt
+
     def steps_to_next_event(self, step: int) -> int | None:
         """Steps until the next print strictly after ``step``; None if none."""
         self._check_step(step)
