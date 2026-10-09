@@ -292,14 +292,21 @@ class FairValuePath:
 def _draw_calendar(config: GameConfig, gen: np.random.Generator) -> np.ndarray:
     """How many prints and when.
 
-    Count is uniform on 0..max_events. Times are uniform over the event window
-    subject to the minimum gap: draw distinct steps from the window shrunk by
-    the total gap, sort, then push each later print out by its share of the
-    gaps. That is the standard construction and it is exactly uniform over
-    the constrained set. Step 0 is never a print: the jump would land on the
-    increment before it, which does not exist.
+    Count is drawn from ``event_count_probs`` by inverse CDF on one uniform,
+    written out rather than left to ``Generator.choice`` so the mapping from
+    bits to a count is ours and cannot change with numpy. A zero-weight count
+    is never chosen. Times are uniform over the event window subject to the
+    minimum gap: draw distinct steps from the window shrunk by the total gap,
+    sort, then push each later print out by its share of the gaps. That is
+    the standard construction and it is exactly uniform over the constrained
+    set. Step 0 is never a print: the jump would land on the increment before
+    it, which does not exist.
     """
-    count = int(gen.integers(0, config.max_events + 1))
+    cdf = np.cumsum(config.event_count_probs)
+    count = int(np.searchsorted(cdf, gen.random(), side="right"))
+    # A cdf ending a few ulp below 1 could overrun; clamp to the largest count
+    # that has weight, never to a trailing zero-weight one.
+    count = min(count, config.max_events)
     if count == 0:
         return np.empty(0, dtype=np.int64)
     lo, hi = config.event_step_bounds

@@ -149,8 +149,8 @@ def test_event_count_never_moves_the_diffusion():
     """Dialling jump intensity must not shift the diffusion path
     underneath it. A zero-event session and a two-event session on the same
     seed share every diffusion increment."""
-    quiet = generate(GameConfig(max_events=0), RngStreams(7))
-    eventful = generate(GameConfig(max_events=2), RngStreams(7))
+    quiet = generate(GameConfig(event_count_probs=(1.0,)), RngStreams(7))
+    eventful = generate(GameConfig(), RngStreams(7))
     assert quiet.event_steps.size == 0
     assert eventful.event_steps.size > 0
     np.testing.assert_array_equal(quiet.diffusion, eventful.diffusion)
@@ -241,7 +241,7 @@ def test_event_markout_is_undefined_when_no_print_follows():
     at = path.event_markout(e)
     assert at.change is None and at.event_index is None and at.event_step is None
     assert path.event_markout(path.n_steps).change is None
-    assert generate(GameConfig(max_events=0), RngStreams(1)).event_markout(0).change is None
+    assert generate(GameConfig(event_count_probs=(1.0,)), RngStreams(1)).event_markout(0).change is None
 
 
 def test_start_level_invariance():
@@ -347,12 +347,39 @@ def test_arrays_are_read_only():
 # --------------------------------------------------------------------------
 
 
-def test_event_count_is_uniform_on_zero_to_max():
-    """Mean 1.0 and every count 0..2 present, over 600 short sessions. SE of
-    the mean is sqrt(2/3)/sqrt(600) = 0.033, so 0.15 is ~4.5 SE."""
-    counts = np.array([generate(SHORT, RngStreams(s)).event_steps.size for s in range(600)])
-    assert set(counts) == {0, 1, 2}
-    assert abs(counts.mean() - 1.0) < 0.15
+def test_event_count_follows_its_weights():
+    """P(0, 1, 2 prints) = 0.2 / 0.4 / 0.4 by default. Over 2,000 short
+    sessions each frequency has SE <= 0.011, so 0.045 is ~4 SE. A zero-weight
+    count is never drawn, including a trailing one."""
+    counts = np.array([generate(SHORT, RngStreams(s)).event_steps.size for s in range(2000)])
+    for k, p in enumerate((0.2, 0.4, 0.4)):
+        assert abs(np.mean(counts == k) - p) < 0.045
+    skewed = dataclasses.replace(SHORT, event_count_probs=(0.5, 0.0, 0.5))
+    drawn = {generate(skewed, RngStreams(s)).event_steps.size for s in range(300)}
+    assert drawn == {0, 2}
+    trailing = dataclasses.replace(SHORT, event_count_probs=(0.5, 0.5, 0.0))
+    assert {generate(trailing, RngStreams(s)).event_steps.size for s in range(300)} == {0, 1}
+
+
+def test_event_drill_has_exactly_one_print_with_a_short_drift():
+    """The 30-minute drill: one print in every session, between minute 10 and
+    minute 20, with a drift of 5-15 minutes ending at it (or shortened to
+    start at the open when the print comes first, at the same rate)."""
+    cfg = GameConfig.for_session(30)
+    lengths = []
+    for s in range(300):
+        p = generate(cfg, RngStreams(s))
+        assert p.event_steps.size == 1
+        e = int(p.event_steps[0])
+        assert 600 <= e * cfg.dt <= 1200
+        (w,) = p.drift_windows
+        assert w.end_step == e
+        length_s = (w.end_step - w.start_step) * cfg.dt
+        assert length_s <= 900 + 1e-9
+        if w.start_step > 0:
+            assert length_s >= 300 - 1e-9
+        lengths.append(length_s)
+    assert min(lengths) < 360 and max(lengths) > 840
 
 
 def test_calendar_respects_bounds_and_minimum_gap():
@@ -653,7 +680,7 @@ DENSE = GameConfig(
     event_min_time_s=10.0,
     event_end_margin_s=10.0,
     event_min_gap_s=0.5,
-    max_events=40,
+    event_count_probs=tuple([1 / 41] * 41),  # 0..40 prints, uniform
 )
 
 
@@ -726,6 +753,11 @@ def test_irregular_observations_are_ar1_with_the_actual_gap():
     must be N(0, 1) and uncorrelated with e_{k-1}. Pooled over irregular gaps
     only, from sessions dense with prints.
 
+    The stationary stdev at the forced readings is checked against a
+    session-clustered standard error, not an iid one: errors in one short
+    session are strongly correlated, and 100-session samples scatter by up
+    to 8%.
+
     A negative control proves the check has teeth. It builds the errors the
     way a naive implementation would -- one sequential AR(1) over the merged
     steps using the fixed 5 s coefficient for every gap -- and confirms the
@@ -747,7 +779,7 @@ def test_irregular_observations_are_ar1_with_the_actual_gap():
 
     u, prev, u_naive, forced_err = [], [], [], []
     shared_interval = 0
-    for seed in range(100):
+    for seed in range(400):
         p = generate(cfg, RngStreams(seed))
         steps, err = p.public.screen_steps, p.screen_error
         ui, pi = innovations(steps, err)
@@ -769,7 +801,10 @@ def test_irregular_observations_are_ar1_with_the_actual_gap():
     assert abs(u.mean()) < 0.06
     assert math.isclose(u.std(ddof=1), 1.0, rel_tol=0.05)
     assert abs(np.corrcoef(u, prev)[0, 1]) < 0.05
-    assert math.isclose(forced_err.std(ddof=1), s, rel_tol=0.08)
+    # Errors within one 600 s session are strongly correlated (tau = 90 s), so
+    # the ~8,000 forced readings carry a session-clustered SE of ~1.5% on
+    # the stdev, not the ~0.6% an iid count suggests; 6% is ~4 clustered SE.
+    assert math.isclose(forced_err.std(ddof=1), s, rel_tol=0.06)
     assert u_naive.std(ddof=1) > 1.5  # the naive generator fails the same check
 
 
@@ -810,8 +845,8 @@ def test_forced_observations_never_move_a_regular_refresh():
     shift every refresh after the first off-grid print."""
     r = GameConfig().screen_refresh_steps
     for seed in range(10):
-        quiet = generate(GameConfig(max_events=0), RngStreams(seed))
-        busy = generate(GameConfig(max_events=2), RngStreams(seed))
+        quiet = generate(GameConfig(event_count_probs=(1.0,)), RngStreams(seed))
+        busy = generate(GameConfig(), RngStreams(seed))
         regular = busy.public.screen_steps % r == 0
         np.testing.assert_array_equal(busy.screen_error[regular], quiet.screen_error)
         np.testing.assert_array_equal(quiet.screen_error, screen_errors(GameConfig(), range(seed, seed + 1))[0])

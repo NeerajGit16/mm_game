@@ -82,14 +82,16 @@ class GameConfig:
     trading_days_per_year: int = 252
 
     # -- Scheduled events ------------------------------------------------------
-    # 0..max_events data prints per session, count uniform. Timing is public;
-    # the outcome is hidden. Times are uniform over the window
+    # Number of data prints per session: event_count_probs[k] is P(k prints).
+    # Timing is public; the outcome is hidden. Weighted toward one or two
+    # prints so most sessions carry event risk; a print-free session is the
+    # quiet baseline about one time in five. Times are uniform over the window
     # [event_min_time_s, session_length - event_end_margin_s] subject to a
     # minimum gap between prints: no print before the player has a baseline
     # and a full minimum-length drift can fit, none so late that there is no
     # aftermath to trade and the mark-outs are all truncated, and no two
     # prints closer than a real calendar puts them.
-    max_events: int = 2
+    event_count_probs: tuple[float, ...] = (0.2, 0.4, 0.4)
     event_min_time_s: float = 15 * 60.0
     event_end_margin_s: float = 10 * 60.0
     event_min_gap_s: float = 30 * 60.0
@@ -243,9 +245,17 @@ class GameConfig:
                 f"trading_days_per_year must be positive, got {self.trading_days_per_year}"
             )
 
-        # Events.
-        if not self.max_events >= 0:
-            raise ValueError(f"max_events must be non-negative, got {self.max_events}")
+        # Events. The count probabilities are normalised to a tuple of floats
+        # so a config reloaded from JSON compares equal, and must already sum
+        # to 1: renormalising silently would hide a typo in a weight.
+        probs = tuple(float(p) for p in self.event_count_probs)
+        object.__setattr__(self, "event_count_probs", probs)
+        if not probs:
+            raise ValueError("event_count_probs must not be empty")
+        if not all(math.isfinite(p) and 0 <= p <= 1 for p in probs):
+            raise ValueError(f"event_count_probs must be probabilities, got {probs}")
+        if not math.isclose(sum(probs), 1.0, rel_tol=0.0, abs_tol=1e-9):
+            raise ValueError(f"event_count_probs must sum to 1, got {sum(probs)}")
         if not (math.isfinite(self.event_min_time_s) and self.event_min_time_s >= 0):
             raise ValueError(
                 f"event_min_time_s must be finite and non-negative, got {self.event_min_time_s}"
@@ -265,9 +275,10 @@ class GameConfig:
                     "event window is empty: session_length - event_end_margin_s - "
                     f"event_min_time_s leaves steps [{lo}, {hi}]"
                 )
-            # Every count up to max_events must be placeable with the minimum
-            # gap, in steps, exactly as the calendar draw computes it -- or the
-            # draw would fail for some seeds and not others.
+            # Every count with non-zero probability must be placeable with the
+            # minimum gap, in steps, exactly as the calendar draw computes it --
+            # or the draw would fail for some seeds and not others. Fewer
+            # prints need less room, so the largest allowed count decides it.
             need = self.max_events - 1
             if hi - lo - need * self.event_min_gap_steps < need:
                 raise ValueError(
@@ -412,6 +423,12 @@ class GameConfig:
         return round(self.event_min_gap_s / self.dt)
 
     @property
+    def max_events(self) -> int:
+        """The largest print count with non-zero probability: the one the
+        placement check has to prove fits."""
+        return max(k for k, p in enumerate(self.event_count_probs) if p > 0)
+
+    @property
     def rfq_arrival_prob(self) -> float:
         """Per-step Bernoulli probability of an RFQ: rate * dt."""
         return self.rfq_rate_per_hour * self.dt / 3600.0
@@ -448,12 +465,39 @@ class GameConfig:
 
 # Session-length presets. Explicit per preset so every value is visible and
 # diffable. Expected informed share at the default category probabilities:
-# 30 min 25.0%, 60 min 26.0%, 120 min 25.6%. A 30-minute session fits one
-# print at most under the event bounds (window 15-20 min), an hour two.
-SESSION_PRESETS: dict[int, dict[str, int]] = {
-    30: {"session_length": 1800, "max_events": 1, "n_hedge_funds": 2, "n_real_money": 3, "n_corporates": 1},
-    60: {"session_length": 3600, "max_events": 2, "n_hedge_funds": 4, "n_real_money": 3, "n_corporates": 3},
-    120: {"session_length": 7200, "max_events": 2, "n_hedge_funds": 6, "n_real_money": 6, "n_corporates": 4},
+# 30 min 25.0%, 60 min 26.0%, 120 min 25.6%.
+#
+# The 30-minute preset is an EVENT DRILL, not a short version of the full
+# game: exactly one print, landing between minute 10 and minute 20, with a
+# 5-15 minute drift running into it, so every drill session carries one
+# event to manage and some aftermath to trade. The 60- and 120-minute
+# presets fit up to two prints under the default event bounds.
+SESSION_PRESETS: dict[int, dict[str, object]] = {
+    30: {
+        "session_length": 1800,
+        "event_count_probs": (0.0, 1.0),
+        "event_min_time_s": 10 * 60.0,
+        "event_end_margin_s": 10 * 60.0,
+        "drift_duration_min_s": 5 * 60.0,
+        "drift_duration_max_s": 15 * 60.0,
+        "n_hedge_funds": 2,
+        "n_real_money": 3,
+        "n_corporates": 1,
+    },
+    60: {
+        "session_length": 3600,
+        "event_count_probs": (0.2, 0.4, 0.4),
+        "n_hedge_funds": 4,
+        "n_real_money": 3,
+        "n_corporates": 3,
+    },
+    120: {
+        "session_length": 7200,
+        "event_count_probs": (0.2, 0.4, 0.4),
+        "n_hedge_funds": 6,
+        "n_real_money": 6,
+        "n_corporates": 4,
+    },
 }
 
 

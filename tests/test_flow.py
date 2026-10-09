@@ -335,7 +335,7 @@ def test_signal_noise_never_flips_a_direction():
         dict(informed_accuracy=0.55),
         dict(informed_activity_multiplier=4.0),
         dict(n_hedge_funds=2, n_real_money=10, n_corporates=8),
-        dict(max_events=0),
+        dict(event_count_probs=(1.0,)),
         dict(drift_magnitude_min_bp=3.0, drift_magnitude_max_bp=5.0),
         dict(screen_noise_bp=2.0),
     ],

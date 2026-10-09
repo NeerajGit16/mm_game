@@ -41,6 +41,7 @@ def test_defaults_match_the_instrument_spec():
     assert cfg.vol_annual_bp == 90.0
     assert cfg.trading_hours_per_day == 24.0
     assert cfg.trading_days_per_year == 252
+    assert cfg.event_count_probs == (0.2, 0.4, 0.4)
     assert cfg.max_events == 2
     assert (cfg.event_min_time_s, cfg.event_end_margin_s, cfg.event_min_gap_s) == (900.0, 600.0, 1800.0)
     assert (cfg.jump_size_min_bp, cfg.jump_size_max_bp) == (2.0, 4.0)
@@ -66,17 +67,21 @@ def test_defaults_match_the_instrument_spec():
 
 
 @pytest.mark.parametrize(
-    "minutes,length,clients,max_events,share",
-    [(30, 1800, 6, 1, 0.250), (60, 3600, 10, 2, 0.260), (120, 7200, 16, 2, 0.25625)],
+    "minutes,length,clients,counts,share",
+    [
+        (30, 1800, 6, (0.0, 1.0), 0.250),
+        (60, 3600, 10, (0.2, 0.4, 0.4), 0.260),
+        (120, 7200, 16, (0.2, 0.4, 0.4), 0.25625),
+    ],
 )
-def test_session_presets_are_explicit(minutes, length, clients, max_events, share):
+def test_session_presets_are_explicit(minutes, length, clients, counts, share):
     """30 / 60 / 120 minutes set 6 / 10 / 16 clients explicitly -- ~8-12 RFQs
-    per client, which is what makes identity learnable -- and the print count
-    the event bounds can fit. Expected informed share stays ~25% on every
-    preset. The 120-minute preset is the default config, so the two can never
-    drift apart."""
+    per client, which is what makes identity learnable -- and the print-count
+    weights. Expected informed share stays ~25% on every preset. The
+    120-minute preset is the default config, so the two can never drift
+    apart."""
     cfg = GameConfig.for_session(minutes)
-    assert (cfg.session_length, cfg.n_clients, cfg.max_events) == (length, clients, max_events)
+    assert (cfg.session_length, cfg.n_clients, cfg.event_count_probs) == (length, clients, counts)
     assert math.isclose(cfg.expected_informed_share, share)
     rfqs_per_client = cfg.rfq_rate_per_hour * minutes / 60 / cfg.n_clients
     assert 8 <= rfqs_per_client <= 13
@@ -84,6 +89,26 @@ def test_session_presets_are_explicit(minutes, length, clients, max_events, shar
     assert GameConfig.for_session(60, rfq_rate_per_hour=50.0).rfq_rate_per_hour == 50.0
     with pytest.raises(ValueError, match="no preset"):
         GameConfig.for_session(45)
+
+
+def test_event_drill_preset():
+    """The 30-minute preset is an event drill: exactly one print, landing
+    between minute 10 and minute 20, with a 5-15 minute drift. Validation has
+    proved the one allowed count is placeable or construction would raise."""
+    cfg = GameConfig.for_session(30)
+    assert cfg.event_count_probs == (0.0, 1.0) and cfg.max_events == 1
+    lo, hi = cfg.event_step_bounds
+    assert (lo * cfg.dt, hi * cfg.dt) == (600.0, 1200.0)
+    assert (cfg.drift_duration_min_s, cfg.drift_duration_max_s) == (300.0, 900.0)
+    assert (cfg.n_hedge_funds, cfg.n_real_money, cfg.n_corporates) == (2, 3, 1)
+
+
+def test_event_count_probs_round_trip_through_json():
+    """Like the mark-out horizons: a list reloaded from JSON must give back a
+    config equal to the one that generated the session."""
+    cfg = GameConfig(event_count_probs=[0.25, 0.75])
+    reloaded = GameConfig(**json.loads(json.dumps(dataclasses.asdict(cfg))))
+    assert reloaded == cfg and reloaded.event_count_probs == (0.25, 0.75)
 
 
 def test_default_category_probabilities_are_strictly_between_zero_and_one():
@@ -141,8 +166,10 @@ def test_event_calendar_must_be_placeable_for_every_seed():
     assert GameConfig(event_min_gap_s=window_s - 0.1).event_min_gap_steps == 56_999
     with pytest.raises(ValueError, match="do not fit"):
         GameConfig(event_min_gap_s=window_s)  # room for two prints is zero steps
-    assert GameConfig(max_events=1, event_min_gap_s=100_000).max_events == 1
-    assert GameConfig(max_events=0, event_min_time_s=7000).max_events == 0
+    assert GameConfig(event_count_probs=(0.5, 0.5), event_min_gap_s=100_000).max_events == 1
+    assert GameConfig(event_count_probs=(1.0,), event_min_time_s=7000).max_events == 0
+    # A trailing zero weight is not an allowed count, so it need not fit.
+    assert GameConfig(event_count_probs=(0.5, 0.5, 0.0), event_min_gap_s=100_000).max_events == 1
     with pytest.raises(ValueError, match="empty"):
         GameConfig(event_min_time_s=7000)
     # A print can never sit on step 0 whatever the lower bound says.
@@ -214,7 +241,10 @@ def test_round_trips_through_json_exactly():
         ("trading_hours_per_day", 0),
         ("trading_hours_per_day", 25),
         ("trading_days_per_year", 0),
-        ("max_events", -1),
+        ("event_count_probs", ()),
+        ("event_count_probs", (0.5, 0.4)),  # sums to 0.9
+        ("event_count_probs", (-0.1, 1.1)),
+        ("event_count_probs", (float("nan"), 1.0)),
         ("event_min_time_s", -1.0),
         ("event_min_time_s", float("nan")),
         ("event_end_margin_s", -1.0),
@@ -290,7 +320,7 @@ def test_dt_may_equal_the_session():
     """Degenerate but coherent: a single-step session. The screen and mark-out
     horizons have to fit the session too."""
     cfg = GameConfig(
-        session_length=10, dt=10, screen_refresh_s=10, markout_horizons_s=(10,), max_events=0
+        session_length=10, dt=10, screen_refresh_s=10, markout_horizons_s=(10,), event_count_probs=(1.0,)
     )
     assert cfg.dt == 10
     assert cfg.n_steps == 1
@@ -326,11 +356,11 @@ def test_ragged_grid_rejected(session_length, dt):
     [
         (7200, 0.1, 72_000, {}),
         (3600, 0.3, 12_000, dict(screen_refresh_s=3.0, markout_horizons_s=(9.0, 60.0, 300.0))),
-        (1, 0.1, 10, dict(screen_refresh_s=0.1, markout_horizons_s=(0.5, 1.0), max_events=0)),
+        (1, 0.1, 10, dict(screen_refresh_s=0.1, markout_horizons_s=(0.5, 1.0), event_count_probs=(1.0,))),
         (7200, 0.001, 7_200_000, {}),
         # 21 / 0.7 is 30.000000000000004 in float: a naive `.is_integer()`
         # rejects it, and a naive `int()` truncates it to 30 by luck only.
-        (21, 0.7, 30, dict(screen_refresh_s=7.0, markout_horizons_s=(7.0, 21.0), max_events=0)),
+        (21, 0.7, 30, dict(screen_refresh_s=7.0, markout_horizons_s=(7.0, 21.0), event_count_probs=(1.0,))),
     ],
 )
 def test_divisible_grid_accepted(session_length, dt, n_steps, extra):
