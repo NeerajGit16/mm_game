@@ -68,6 +68,7 @@ def test_defaults_match_the_instrument_spec():
     assert (cfg.competitor_half_spread_bp, cfg.competitor_size_widen_bp) == (0.5, 0.5)
     assert (cfg.competitor_print_widen, cfg.competitor_print_window_s) == (1.0, 120.0)
     assert (cfg.competitor_screen_weight, cfg.competitor_error_bp, cfg.competitor_error_corr_s) == (0.75, 0.15, 120.0)
+    assert (cfg.competitor_participation_prob, cfg.informed_participation_multiplier) == (0.6, 1.0)
     assert (cfg.client_tolerance_bp, cfg.client_tolerance_log_sd, cfg.client_tolerance_size_growth) == (0.75, 0.4, 0.5)
     assert cfg.informed_edge_given_up == 0.5
     assert (cfg.hedge_cost_bp, cfg.hedge_impact_bp, cfg.hedge_margin_bp) == (1.0, 0.5, 0.25)
@@ -334,6 +335,10 @@ def test_round_trips_through_json_exactly():
         ("competitor_screen_weight", 1.5),
         ("competitor_error_bp", -0.1),
         ("competitor_error_corr_s", float("nan")),
+        ("competitor_participation_prob", 1.1),
+        ("competitor_participation_prob", float("nan")),
+        ("informed_participation_multiplier", -0.5),
+        ("informed_participation_multiplier", float("inf")),
         ("client_tolerance_bp", 0.0),
         ("client_tolerance_log_sd", -0.1),
         ("informed_edge_given_up", 1.5),

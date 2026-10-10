@@ -34,6 +34,10 @@ Model, in one pass over the arrivals:
   informed RFQs scale it by signal strength. Bigger on average, overlapping.
 - **One-way.** A minority of RFQs from both populations show their side on
   arrival. Drawn after the side, so tuning the rate never moves a side.
+- **Competition.** Each RFQ goes to each of the dealers independently, one
+  uniform per dealer. How many are in competition is public on arrival, as a
+  platform shows it; which ones is hidden. Informed clients can be made to
+  ask fewer dealers, a lever built and off by default.
 
 Every draw comes from a substream -- arrivals on market ordinal, client types
 on client id, signals on the (client, print) pair, everything else on RFQ
@@ -45,6 +49,8 @@ construction:
 - informed probabilities never move client assignment, base size, or any
   uninformed RFQ (while the activity multiplier is at its inert 1.0);
 - only the arrival rate and the grid move arrivals;
+- competition is drawn last, from its own stream, so it moves nothing else,
+  and raising the participation probability only ever adds dealers;
 - nothing here touches a fair-value stream: the path is an input.
 
 The public/private split mirrors ``FairValuePath``: ``FlowSchedule.public``
@@ -105,7 +111,8 @@ class Client:
 @dataclass(frozen=True)
 class PublicRFQ:
     """An inquiry as the player sees it on arrival. ``side`` is None for a
-    two-way RFQ: the client says the size, not the direction."""
+    two-way RFQ: the client says the size, not the direction. ``in_comp`` is
+    how many other dealers were asked -- not which."""
 
     ordinal: int
     step: int
@@ -113,6 +120,7 @@ class PublicRFQ:
     size: int
     one_way: bool
     side: Side | None
+    in_comp: int
 
 
 @dataclass(frozen=True)
@@ -129,6 +137,12 @@ class RFQ:
     signal_bp: float | None  # hidden: the noisy print estimate, signed
     event_index: int | None  # hidden: the print they are informed about
     base_size: float  # hidden: the lognormal draw before scaling and rounding
+    dealers_in_comp: tuple[bool, ...]  # hidden: which dealers were asked
+
+    @property
+    def in_comp(self) -> int:
+        """How many dealers are in competition. Public."""
+        return sum(self.dealers_in_comp)
 
     @property
     def public(self) -> PublicRFQ:
@@ -139,6 +153,7 @@ class RFQ:
             size=self.size,
             one_way=self.one_way,
             side=self.side if self.one_way else None,
+            in_comp=self.in_comp,
         )
 
 
@@ -161,6 +176,7 @@ class PublicFlow:
                     "size": q.size,
                     "one_way": q.one_way,
                     "side": None if q.side is None else int(q.side),
+                    "in_comp": q.in_comp,
                 }
                 for q in self.rfqs
             ],
@@ -200,6 +216,7 @@ class FlowSchedule:
                     "signal_bp": q.signal_bp,
                     "event_index": q.event_index,
                     "base_size": q.base_size,
+                    "dealers_in_comp": list(q.dealers_in_comp),
                 }
                 for q in self.rfqs
             ],
@@ -325,6 +342,19 @@ def _size_factor(config: GameConfig, signal_bp: float) -> float:
     return min(config.informed_size_factor_max, max(config.informed_size_factor_min, raw))
 
 
+def _dealers_in_comp(config: GameConfig, gen: np.random.Generator, informed: bool) -> tuple[bool, ...]:
+    """Which dealers an RFQ goes to: one uniform per dealer against the
+    participation probability, so raising it only ever adds dealers and a
+    dealer added to the street never changes whether the others are in. On
+    informed RFQs the probability is scaled by the informed multiplier; at
+    1.0 the comparison is exactly the uninformed one."""
+    u = gen.random(config.n_competitors)
+    p = config.competitor_participation_prob
+    if informed:
+        p = min(1.0, p * config.informed_participation_multiplier)
+    return tuple(bool(x < p) for x in u)
+
+
 def _lots(config: GameConfig, size: float) -> int:
     """Whole lots, at least 1, at most the cap. No single inquiry decides a session."""
     return int(max(1, min(config.size_cap_lots, round(size))))
@@ -410,6 +440,9 @@ def generate(config: GameConfig, rng: RngStreams, path: FairValuePath) -> FlowSc
                 signal_bp=signal,
                 event_index=event_index,
                 base_size=base,
+                dealers_in_comp=_dealers_in_comp(
+                    config, rng.substream(Stream.FLOW_PARTICIPATION, ordinal), informed
+                ),
             )
         )
 

@@ -36,12 +36,18 @@ The client
     ranges overlap, so a fill at a wide price is evidence, never proof. The
     client trades with the best price inside the limit, or walks.
 
+Competition
+    Not every dealer is asked: the RFQ says how many are in competition, not
+    which. Only those dealers' prices compete; the others' are drawn anyway,
+    so how many are asked never moves anyone's price. With nobody else in,
+    you compete only against the client's limit.
+
 What you are told
-    WON: the cover, the best competing price. DONE_AWAY: the side the client
-    traded and the level it traded at. NOT_DONE: only that the client walked.
-    PASSED: nothing at all -- passing has an information cost as well as a
-    spread cost, which is why dealers keep quoting when they don't want the
-    trade.
+    WON: the cover, the best competing price -- none if nobody else was in.
+    DONE_AWAY: the side the client traded and the level it traded at.
+    NOT_DONE: only that the client walked. PASSED: nothing at all -- passing
+    has an information cost as well as a spread cost, which is why dealers
+    keep quoting when they don't want the trade.
 """
 
 from __future__ import annotations
@@ -144,7 +150,7 @@ class FillReport:
     outcome: Outcome
     side: Side | None  # the client's side, where revealed
     price: float | None  # your fill price, if WON
-    cover: float | None  # WON: best competing price; DONE_AWAY: the traded level
+    cover: float | None  # WON: best competing price (None if none in); DONE_AWAY: the traded level
     quantity: int  # signed change in your position: 0 unless WON
 
     def to_record(self) -> dict[str, object]:
@@ -299,14 +305,25 @@ def apply_position_limit(
 # --------------------------------------------------------------------------
 
 
+def street_ticks(rfq: RFQ, market: MarketSide) -> tuple[int, ...]:
+    """The prices of the dealers in competition, on the client's side, in
+    ticks. Empty when nobody else was asked."""
+    ticks = market.competitor_ask_ticks if rfq.side is Side.BUY else market.competitor_bid_ticks
+    if len(rfq.dealers_in_comp) != len(ticks):
+        raise ValueError("RFQ and market side disagree on the number of dealers")
+    return tuple(t for t, asked in zip(ticks, rfq.dealers_in_comp) if asked)
+
+
 def resolve(rfq: RFQ, quote: Quote | None, market: MarketSide, config: GameConfig) -> FillReport:
     """Pure: the outcome of one RFQ given your quote and its pre-drawn market.
 
-    The client compares your price on their side with the best competitor's.
-    The better one trades if it is inside the client's limit; otherwise the
-    client walks. A tie with k dealers at the best price goes to you with
-    probability 1 / (k + 1), decided by the pre-drawn uniform -- never by a
-    rule that always favours one side.
+    The client compares your price on their side with the best price among
+    the dealers in competition. The better one trades if it is inside the
+    client's limit; otherwise the client walks. A tie with k dealers at the
+    best price goes to you with probability 1 / (k + 1), decided by the
+    pre-drawn uniform -- never by a rule that always favours one side. With
+    no dealer in competition you face only the limit: a win carries no
+    cover, and the client cannot trade away.
     """
     if market.rfq_ordinal != rfq.ordinal:
         raise ValueError(f"market side {market.rfq_ordinal} is not for RFQ {rfq.ordinal}")
@@ -318,19 +335,19 @@ def resolve(rfq: RFQ, quote: Quote | None, market: MarketSide, config: GameConfi
     # Work in "ticks as the client sees them": lower is better for the client
     # on either side, so one comparison serves both.
     sign = int(rfq.side)  # BUY +1: client pays your ask; SELL -1: client hits your bid
-    if rfq.side is Side.BUY:
-        yours = None if quote.ask is None else to_ticks(quote.ask, config)
-        theirs = market.best_ask_ticks
-        at_best = market.competitor_ask_ticks.count(theirs)
-    else:
-        yours = None if quote.bid is None else to_ticks(quote.bid, config)
-        theirs = market.best_bid_ticks
-        at_best = market.competitor_bid_ticks.count(theirs)
+    yours_price = quote.ask if rfq.side is Side.BUY else quote.bid
+    yours = None if yours_price is None else to_ticks(yours_price, config)
+    street = street_ticks(rfq, market)
+    # Lower is better for the client on either side once multiplied by sign.
+    theirs = min(street, key=lambda k: sign * k) if street else None
+    at_best = street.count(theirs) if street else 0
 
     def acceptable(k: int) -> bool:
         return sign * (from_ticks(k, config) - market.client_limit) <= 1e-12
 
-    you_best = yours is not None and sign * yours < sign * theirs
+    if theirs is None and yours is None:
+        return FillReport(rfq.ordinal, Outcome.NOT_DONE, None, None, None, 0)
+    you_best = yours is not None and (theirs is None or sign * yours < sign * theirs)
     tied = yours is not None and yours == theirs
     best = yours if you_best else theirs
     if not acceptable(best):
@@ -343,7 +360,7 @@ def resolve(rfq: RFQ, quote: Quote | None, market: MarketSide, config: GameConfi
             outcome=Outcome.WON,
             side=rfq.side,
             price=from_ticks(yours, config),
-            cover=from_ticks(theirs, config),
+            cover=None if theirs is None else from_ticks(theirs, config),
             quantity=-sign * rfq.size,  # client buys: you sell
         )
     return FillReport(

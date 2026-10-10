@@ -34,6 +34,7 @@ FLOW_STREAMS = {
     Stream.FLOW_SIZE,
     Stream.FLOW_DIRECTION,
     Stream.FLOW_INFORMED,
+    Stream.FLOW_PARTICIPATION,
 }
 FAIR_VALUE_STREAMS = (Stream.FAIR_VALUE, Stream.EVENTS, Stream.JUMPS, Stream.DRIFT, Stream.SCREEN, Stream.SCREEN_PRINT)
 
@@ -300,6 +301,74 @@ def test_size_model_never_moves_anything_but_size():
         assert any(x.size != y.size for x, y in zip(a.rfqs, b.rfqs))
 
 
+def test_participation_never_moves_anything_else_and_only_adds_dealers():
+    """Raise the participation probability: step, client, side, size,
+    one-way flag, informed status and signal are bit-identical, and every
+    dealer in competition at the lower probability is still in. One uniform
+    per dealer compared against the probability is what guarantees it; a
+    draw that picked "how many" first and then "which" would reshuffle the
+    street whenever the probability moved."""
+    low, high = GameConfig(competitor_participation_prob=0.4), GameConfig(competitor_participation_prob=0.7)
+    added = 0
+    for seed in range(5):
+        _, a = session(low, seed)
+        _, b = session(high, seed)
+        for x, y in zip(a.rfqs, b.rfqs):
+            assert (x.step, x.client_id, x.side, x.size, x.one_way, x.informed, x.signal_bp) == (
+                y.step,
+                y.client_id,
+                y.side,
+                y.size,
+                y.one_way,
+                y.informed,
+                y.signal_bp,
+            )
+            assert all(hi or not lo for lo, hi in zip(x.dealers_in_comp, y.dealers_in_comp))
+            added += y.in_comp - x.in_comp
+    assert added > 100
+
+
+def test_competition_count_is_binomial():
+    """Each of three dealers in independently at 0.6: none 6.4%, one 28.8%,
+    two 43.2%, all three 21.6%."""
+    counts = np.bincount([q.in_comp for s in range(40) for q in session(GameConfig(), s)[1].rfqs], minlength=4)
+    shares = counts / counts.sum()
+    for k, expected in enumerate((0.064, 0.288, 0.432, 0.216)):
+        assert abs(shares[k] - expected) < 0.015
+
+
+def test_informed_participation_lever_is_built_and_inert_by_default(stat_sessions):
+    """At the default multiplier of 1.0, every RFQ's dealers are exactly what
+    a build without the lever draws: one uniform per dealer from the RFQ's own
+    substream against the plain probability, informed or not. An
+    implementation that drew differently for informed RFQs would move the
+    street for exactly the inquiries that matter, with the lever "off". Turned
+    down, it thins competition on informed RFQs only."""
+    cfg = STAT
+    rfqs = 0
+    for seed in range(20):
+        _, sched = session(cfg, seed)
+        rng = RngStreams(seed)
+        for q in sched.rfqs:
+            u = rng.substream(Stream.FLOW_PARTICIPATION, q.ordinal).random(cfg.n_competitors)
+            assert q.dealers_in_comp == tuple(bool(x < cfg.competitor_participation_prob) for x in u)
+            rfqs += 1
+    assert rfqs > 1000
+
+    shy = dataclasses.replace(cfg, informed_participation_multiplier=0.3)
+    fewer = 0
+    for seed in range(20):
+        _, a = session(cfg, seed)
+        _, b = session(shy, seed)
+        for x, y in zip(a.rfqs, b.rfqs):
+            if x.informed:
+                assert y.in_comp <= x.in_comp
+                fewer += y.in_comp < x.in_comp
+            else:
+                assert x.dealers_in_comp == y.dealers_in_comp
+    assert fewer > 20
+
+
 def test_one_way_rates_never_move_a_side():
     """Side is drawn before the one-way flag from the same per-RFQ substream,
     so tuning one-way rates changes which RFQs show their side, never which
@@ -562,9 +631,10 @@ def test_one_way_rates_by_population(stat_sessions):
 
 def test_public_view_cannot_reach_hidden_fields():
     """The public RFQ carries ordinal, step, client, size, the
-    one-way flag, and the side only when one-way. Informed status, signal,
-    the print it concerns, base size and a two-way side are structurally
-    absent, not merely ignored."""
+    one-way flag, the side only when one-way, and how many dealers are in
+    competition. Informed status, signal, the print it concerns, base size,
+    a two-way side and which dealers were asked are structurally absent, not
+    merely ignored."""
     _, sched = session(GameConfig(), 5)
     assert {f.name for f in dataclasses.fields(PublicRFQ)} == {
         "ordinal",
@@ -573,16 +643,18 @@ def test_public_view_cannot_reach_hidden_fields():
         "size",
         "one_way",
         "side",
+        "in_comp",
     }
     assert {f.name for f in dataclasses.fields(flow.PublicClient)} == {"client_id", "category"}
     pub = sched.public
     for q, p in zip(sched.rfqs, pub.rfqs):
         assert p.side == (q.side if q.one_way else None)
-        for hidden in ("informed", "signal_bp", "event_index", "base_size"):
+        assert p.in_comp == sum(q.dealers_in_comp)
+        for hidden in ("informed", "signal_bp", "event_index", "base_size", "dealers_in_comp"):
             assert not hasattr(p, hidden)
     assert any(p.side is None for p in pub.rfqs) and any(p.side is not None for p in pub.rfqs)
     record = json.dumps(pub.to_record())
-    for hidden in ("informed", "signal", "event_index", "base_size"):
+    for hidden in ("informed", "signal", "event_index", "base_size", "dealers_in_comp"):
         assert hidden not in record
 
 

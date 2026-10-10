@@ -24,7 +24,7 @@ import pytest
 import mm_game
 from mm_game import fair_value, fills, flow
 from mm_game.config import GameConfig
-from mm_game.fills import MarketSide, Outcome, Quote, from_ticks, to_ticks
+from mm_game.fills import MarketSide, Outcome, Quote, from_ticks, street_ticks, to_ticks
 from mm_game.flow import RFQ, FlowSchedule, Side
 from mm_game.rng import RngStreams, Stream
 
@@ -39,6 +39,9 @@ STAT = GameConfig(
     event_min_gap_s=120.0,
     rfq_rate_per_hour=600.0,
 )
+# Every dealer in on every RFQ: the street as it was before competition
+# varied, for the tests that calibrate against a full street.
+FULL_STREET = GameConfig(competitor_participation_prob=1.0)
 
 
 def world(cfg: GameConfig, seed: int):
@@ -87,7 +90,9 @@ def stat_worlds():
     return [world(STAT, s) for s in range(300)]
 
 
-def make_rfq(side: Side = Side.BUY, size: int = 10, informed: bool = False) -> RFQ:
+def make_rfq(
+    side: Side = Side.BUY, size: int = 10, informed: bool = False, dealers: tuple[bool, ...] = (True, True, True)
+) -> RFQ:
     return RFQ(
         ordinal=0,
         step=10,
@@ -99,6 +104,7 @@ def make_rfq(side: Side = Side.BUY, size: int = 10, informed: bool = False) -> R
         signal_bp=None,
         event_index=None,
         base_size=float(size),
+        dealers_in_comp=dealers,
     )
 
 
@@ -341,6 +347,67 @@ def test_feedback_per_outcome():
     assert (seller.outcome, seller.quantity, seller.cover) == (Outcome.WON, 7, s - 2 * t)
 
 
+def test_only_dealers_in_competition_compete():
+    """A dealer who was not asked cannot win the trade, set the cover or
+    split a tie, however good its price. Dealer 0 shows the best ask of all;
+    with it out, you win at a price it would have beaten, the cover is the
+    best of the dealers who were in, and a tie is split with those only."""
+    cfg = GameConfig()
+    s, t = cfg.start_level, cfg.tick_size
+    market = make_market(limit=s + 9 * t, asks=(1, 3, 4), tie_u=0.4)
+    rfq = make_rfq(Side.BUY, dealers=(False, True, True))
+    won = fills.resolve(rfq, Quote(0, ask=s + 2 * t), market, cfg)
+    assert (won.outcome, won.cover) == (Outcome.WON, s + 3 * t)
+    away = fills.resolve(make_rfq(Side.BUY, dealers=(True, True, True)), Quote(0, ask=s + 2 * t), market, cfg)
+    assert (away.outcome, away.cover) == (Outcome.DONE_AWAY, s + t)
+    # A tie with one dealer in: yours with probability 1/2 (u = 0.4 wins),
+    # where counting the absent dealer at the same price would make it 1/3.
+    tie_market = make_market(limit=s + 9 * t, asks=(3, 3, 5), tie_u=0.4)
+    tie = fills.resolve(make_rfq(Side.BUY, dealers=(True, False, True)), Quote(0, ask=s + 3 * t), tie_market, cfg)
+    assert tie.outcome is Outcome.WON
+
+
+def test_with_nobody_else_in_you_face_only_the_limit():
+    """In comp 0: inside the limit you win with no cover; outside it the
+    client walks; a done-away is impossible; quoting only the other side is
+    a walk, not a pass."""
+    cfg = GameConfig()
+    s, t = cfg.start_level, cfg.tick_size
+    alone = (False, False, False)
+    market = make_market(limit=s + 4 * t, asks=(1, 1, 1))
+    won = fills.resolve(make_rfq(Side.BUY, dealers=alone), Quote(0, ask=s + 4 * t), market, cfg)
+    assert (won.outcome, won.price, won.cover, won.quantity) == (Outcome.WON, s + 4 * t, None, -10)
+    walked = fills.resolve(make_rfq(Side.BUY, dealers=alone), Quote(0, ask=s + 5 * t), market, cfg)
+    assert walked.outcome is Outcome.NOT_DONE
+    wrong_side = fills.resolve(make_rfq(Side.BUY, dealers=alone), Quote(0, bid=s - t), market, cfg)
+    assert wrong_side.outcome is Outcome.NOT_DONE
+    assert fills.resolve(make_rfq(Side.BUY, dealers=alone), None, market, cfg).outcome is Outcome.PASSED
+    seen = set()
+    for path, schedule, sides in (world(STAT, s) for s in range(30)):
+        for rfq, m in zip(schedule.rfqs, sides):
+            if rfq.in_comp == 0:
+                p = path.public.screen_at(rfq.step)
+                for w in (1, 3, 6):
+                    r = fills.resolve(rfq, Quote(rfq.ordinal, bid=p - w * t, ask=p + w * t), m, cfg)
+                    seen.add(r.outcome)
+                    assert r.outcome is not Outcome.DONE_AWAY
+                    assert r.cover is None
+    assert seen == {Outcome.WON, Outcome.NOT_DONE}
+
+
+def test_participation_never_moves_a_quote_a_limit_or_the_street():
+    """Dealers' prices and errors are drawn for every dealer whether or not
+    it is asked, and limits and tie-breaks per RFQ, so moving the
+    participation probability or the informed multiplier leaves every
+    market side bit-identical. Drawn only for dealers in competition, the
+    street's errors would re-roll whenever competition changed, and "same
+    session, different competition" would compare two different markets."""
+    base = world(GameConfig(), 6)[2]
+    for change in (dict(competitor_participation_prob=0.2), dict(competitor_participation_prob=1.0),
+                   dict(informed_participation_multiplier=0.3)):
+        assert world(GameConfig(**change), 6)[2] == base
+
+
 def test_client_walks_unless_the_best_price_is_inside_the_limit():
     """The client trades with the best price only if it is inside their
     limit -- even when you are best, a price beyond the limit is NOT_DONE,
@@ -383,14 +450,16 @@ def test_tie_win_rate_matches_the_rule(stat_worlds):
         for rfq, market in zip(schedule.rfqs, sides):
             s = path.public.screen_at(rfq.step)
             quote = Quote(rfq.ordinal, bid=s - w, ask=s + w)
-            ticks = market.competitor_ask_ticks if rfq.side is Side.BUY else market.competitor_bid_ticks
-            best = market.best_ask_ticks if rfq.side is Side.BUY else market.best_bid_ticks
+            street = street_ticks(rfq, market)
+            if not street:
+                continue
+            best = min(street, key=lambda k: int(rfq.side) * k)
             yours = to_ticks(quote.ask if rfq.side is Side.BUY else quote.bid, cfg)
             report = fills.resolve(rfq, quote, market, cfg)
             if yours == best and report.outcome is not Outcome.NOT_DONE:
                 won.append(report.outcome is Outcome.WON)
-                expected.append(1 / (ticks.count(best) + 1))
-    assert len(won) > 3000
+                expected.append(1 / (street.count(best) + 1))
+    assert len(won) > 2000
     assert abs(np.mean(won) - np.mean(expected)) < 0.03
 
 
@@ -544,18 +613,24 @@ def test_informed_clients_pay_wider_and_rarely_walk(stat_worlds):
     assert np.mean(walked[True]) < 0.04 < np.mean(walked[False])
 
 
-def hit_and_tie_curve(cfg: GameConfig, widths: tuple[int, ...], seeds) -> dict[int, tuple[float, float]]:
-    """Per half-width in ticks: (hit rate, share of wins that were ties)."""
+def hit_and_tie_curve(
+    cfg: GameConfig, widths: tuple[int, ...], seeds, in_comp: int | None = None
+) -> dict[int, tuple[float, float]]:
+    """Per half-width in ticks: (hit rate, share of wins that were ties),
+    over every RFQ or only those with ``in_comp`` dealers in competition."""
     out = {}
     worlds = [world(cfg, s) for s in seeds]
     for k in widths:
         won = won_on_tie = total = 0
         for path, schedule, sides in worlds:
             for rfq, market in zip(schedule.rfqs, sides):
+                if in_comp is not None and rfq.in_comp != in_comp:
+                    continue
                 s = path.public.screen_at(rfq.step)
                 quote = Quote(rfq.ordinal, bid=s - k * cfg.tick_size, ask=s + k * cfg.tick_size)
                 report = fills.resolve(rfq, quote, market, cfg)
-                best = market.best_ask_ticks if rfq.side is Side.BUY else market.best_bid_ticks
+                street = street_ticks(rfq, market)
+                best = min(street, key=lambda x: int(rfq.side) * x) if street else None
                 mine = to_ticks(quote.ask if rfq.side is Side.BUY else quote.bid, cfg)
                 total += 1
                 if report.outcome is Outcome.WON:
@@ -565,17 +640,36 @@ def hit_and_tie_curve(cfg: GameConfig, widths: tuple[int, ...], seeds) -> dict[i
     return out
 
 
-def test_hit_rate_at_half_a_bp_is_near_a_third():
+def test_hit_rate_at_half_a_bp_against_a_full_street_is_near_a_third():
     """Calibration target: quoting 0.5bp either side of the screen against
-    three dealers wins roughly a third of RFQs. Measured ~34%; the band
+    all three dealers wins roughly a third of RFQs. Measured ~34%; the band
     allows tuning in play without silently drifting to a different game."""
-    cfg = GameConfig()
+    cfg = FULL_STREET
     won = total = 0
     for seed in range(20):
         _, _, _, reports, _ = play(cfg, seed, around_screen(cfg, ticks_for(cfg, 0.5)))
         won += sum(r.outcome is Outcome.WON for r in reports)
         total += len(reports)
     assert 0.27 < won / total < 0.42
+
+
+def test_width_is_graded_when_competition_is_thin_and_binary_when_full():
+    """The point of variable competition. With nobody else in, the client's
+    limit is the only filter and the hit rate falls gradually with width
+    (measured 100 / 89 / 58 / 32% at one to four ticks); with one dealer it
+    still grades (90 / 56 / 17 / 3%); against all three it is near-binary
+    (78 / 34 / 6 / 0.6%). At every width, more competition never wins more.
+    Catches the count being drawn but ignored in resolution -- a public
+    number that changes nothing -- or a resolution that compares against
+    dealers who were never asked."""
+    cfg = GameConfig()
+    curves = {k: hit_and_tie_curve(cfg, (1, 2, 3, 4), range(40), in_comp=k) for k in (0, 1, 3)}
+    for w in (1, 2, 3, 4):
+        assert curves[0][w][0] >= curves[1][w][0] >= curves[3][w][0]
+    assert curves[0][4][0] > 0.2 and curves[0][3][0] > 0.45
+    assert curves[1][3][0] > 0.10
+    assert curves[3][3][0] < 0.10 and curves[3][4][0] < 0.02
+    assert curves[0][2][1] == 0.0  # nobody to tie with
 
 
 def test_the_grid_resolves_the_competitive_range():
@@ -587,13 +681,14 @@ def test_the_grid_resolves_the_competitive_range():
     around the screen. The negative control is the old half-bp tick at the
     same bp economics: there one tick wide was decided mostly by ties and one
     tick wider won almost nothing, so the width decision was binary."""
-    fine = hit_and_tie_curve(GameConfig(), (1, 2, 3), range(15))
+    fine = hit_and_tie_curve(FULL_STREET, (1, 2, 3), range(15))
     (h1, t1), (h2, t2), (h3, _) = fine[1], fine[2], fine[3]
     assert h1 > h2 > h3
     assert 0.65 < h1 < 0.88 and 0.27 < h2 < 0.42 and 0.03 < h3 < 0.10
     assert t1 < 0.30 and t2 < 0.55
 
-    coarse = hit_and_tie_curve(GameConfig(tick_size=0.5, tick_value=25.0), (1, 2), range(15))
+    coarse_cfg = dataclasses.replace(FULL_STREET, tick_size=0.5, tick_value=25.0)
+    coarse = hit_and_tie_curve(coarse_cfg, (1, 2), range(15))
     assert coarse[1][1] > 0.55  # wins at the natural width mostly ties
     assert coarse[2][0] < 0.03  # and one tick wider wins almost nothing
 

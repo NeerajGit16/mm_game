@@ -214,6 +214,17 @@ class GameConfig:
     competitor_screen_weight: float = 0.75
     competitor_error_bp: float = 0.15
     competitor_error_corr_s: float = 120.0
+    # Not every dealer is asked. Each is in competition on an RFQ
+    # independently with this probability -- one uniform per dealer per RFQ,
+    # so raising it only ever adds dealers. The count in competition is
+    # public on the RFQ, as a platform shows it; which dealers are in is not.
+    # Every dealer's price is drawn whether or not it is in, so this never
+    # moves a quote. At 0.6: none in 6% of RFQs, one 29%, two 43%, three 22%.
+    competitor_participation_prob: float = 0.6
+    # Informed clients ask fewer dealers: their RFQs use the probability times
+    # this. Built and off at 1.0, where every RFQ's participation is
+    # bit-identical to a build without it.
+    informed_participation_multiplier: float = 1.0
 
     # -- Fills: client limits --------------------------------------------------
     # Every RFQ carries the worst price the client accepts on their side.
@@ -478,6 +489,16 @@ class GameConfig:
         if not 0 <= self.competitor_screen_weight <= 1:
             raise ValueError(
                 f"competitor_screen_weight must be in [0, 1], got {self.competitor_screen_weight}"
+            )
+        if not 0 <= self.competitor_participation_prob <= 1:
+            raise ValueError(
+                "competitor_participation_prob must be a probability, got "
+                f"{self.competitor_participation_prob}"
+            )
+        if not (math.isfinite(self.informed_participation_multiplier) and self.informed_participation_multiplier >= 0):
+            raise ValueError(
+                "informed_participation_multiplier must be finite and non-negative, got "
+                f"{self.informed_participation_multiplier}"
             )
 
         # Fills: client limits.

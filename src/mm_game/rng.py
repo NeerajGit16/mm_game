@@ -58,9 +58,10 @@ class Stream(StrEnum):
     Flow is split along its own counterfactual axes. ``FLOW_ARRIVAL`` decides
     when; ``FLOW_CLIENT`` decides who, per RFQ; ``FLOW_CLIENT_TYPE`` is one
     uniform per roster client deciding informed type; ``FLOW_SIZE``,
-    ``FLOW_DIRECTION`` and ``FLOW_INFORMED`` are per-RFQ attributes. So the
-    size model never moves a side, and the informed share never moves who
-    called.
+    ``FLOW_DIRECTION`` and ``FLOW_INFORMED`` are per-RFQ attributes, and
+    ``FLOW_PARTICIPATION`` is which dealers each RFQ is sent to. So the size
+    model never moves a side, the informed share never moves who called, and
+    the number of dealers in competition never moves anything but itself.
 
     Fills has two. ``COMPETITION`` is each competing dealer's persistent
     pricing error, a time process keyed on dealer ordinal, so changing the
@@ -86,6 +87,7 @@ class Stream(StrEnum):
     FLOW_SIZE = "flow_size"
     FLOW_DIRECTION = "flow_direction"
     FLOW_INFORMED = "flow_informed"
+    FLOW_PARTICIPATION = "flow_participation"
     COMPETITION = "competition"
     ACCEPTANCE = "acceptance"
     AGENTS = "agents"
