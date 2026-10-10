@@ -457,6 +457,10 @@ BOT_LABEL = (
 )
 
 
+def _horizon(key: str) -> str:
+    return key.replace("_", " ")
+
+
 def markdown_summary(record: dict[str, Any]) -> str:
     h, s, dec, d = record["header"], record["scores"], record["decomposition"], record["diagnostics"]
     bots = record["benchmarks"]
@@ -504,9 +508,10 @@ def markdown_summary(record: dict[str, Any]) -> str:
         "",
         "Every line is a contribution to P&L; each column adds up to the total. Adverse "
         "selection is your fills' mark-outs at that horizon — negative when the flow moved "
-        "against you.",
+        "against you. Next event marks each fill through the next print or the end of the "
+        "next unannounced move, whichever comes first.",
         "",
-        "| | " + " | ".join(horizons) + " |",
+        "| | " + " | ".join(_horizon(k) for k in horizons) + " |",
         "|---" * (1 + len(horizons)) + "|",
         "| Spread captured | " + " | ".join(_signed(dec["spread_captured_usd"]) for _ in horizons) + " |",
         "| Adverse selection | " + " | ".join(_signed(dec["by_horizon"][k]["adverse_selection_usd"]) for k in horizons) + " |",
@@ -518,7 +523,7 @@ def markdown_summary(record: dict[str, Any]) -> str:
         "",
         "Adverse selection by who was on the other side (these add up to the line above):",
         "",
-        "| | " + " | ".join(horizons) + " |",
+        "| | " + " | ".join(_horizon(k) for k in horizons) + " |",
         "|---" * (1 + len(horizons)) + "|",
     ]
     for t, label in TYPE_LABEL.items():
@@ -527,12 +532,14 @@ def markdown_summary(record: dict[str, Any]) -> str:
             + " | ".join(_signed(dec["by_horizon"][k]["adverse_selection_by_type_usd"][t]) for k in horizons)
             + " |"
         )
-    excluded = ", ".join(f"{k}: {v['fills_excluded']}" for k, v in dec["by_horizon"].items() if v["fills_excluded"])
+    excluded = ", ".join(
+        f"{_horizon(k)}: {v['fills_excluded']}" for k, v in dec["by_horizon"].items() if v["fills_excluded"]
+    )
     lines += [
         "",
         f"Hedging and closing splits into the venue's charge {_signed(dec['venue_charge_usd'])} and the screen's "
         f"error when you hedged {_signed(dec['screen_error_on_hedges_usd'])}."
-        + (f" Fills left out of adverse selection (mark-out cut off by the close, or no print after): {excluded}; "
+        + (f" Fills left out of adverse selection (mark-out cut off by the close, or no print or move after): {excluded}; "
            "their moves stay in inventory." if excluded else ""),
         "",
     ]
@@ -563,7 +570,7 @@ def markdown_summary(record: dict[str, Any]) -> str:
         "Mark-outs are P&L contributions from your fills with that client. True type and what "
         "each informed client knew are revealed now.",
         "",
-        "| Client | Category | True type | RFQs | Quoted | Won | Lots | Net lots | 60s | 300s | Event | Knew about |",
+        "| Client | Category | True type | RFQs | Quoted | Won | Lots | Your net lots | 60s | 300s | Next event | Knew about |",
         "|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for cid, c in sorted(d["clients"].items(), key=lambda kv: int(kv[0])):
@@ -577,7 +584,7 @@ def markdown_summary(record: dict[str, Any]) -> str:
             f"| {cid} | {c['category'].replace('_', ' ')} | {'informed' if c['informed_type'] else 'uninformed'} | "
             f"{c['rfqs']} | {c['quoted']} | {c['won']} | {c['lots']} | {c['net_lots']:+d} | "
             f"{_signed(mk['60s']) if c['won'] else '—'} | {_signed(mk['300s']) if c['won'] else '—'} | "
-            f"{_signed(mk['event']) if c['won'] else '—'} | {knew} |"
+            f"{_signed(mk[sc.NEXT_EVENT]) if c['won'] else '—'} | {knew} |"
         )
     lines.append("")
 

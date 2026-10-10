@@ -23,8 +23,8 @@ from mm_game.config import GameConfig
 from mm_game.fair_value import (
     INSTRUMENT_ORDINAL,
     DriftWindow,
-    EventMarkOut,
     FairValuePath,
+    NextEventMarkOut,
     PublicView,
     _bridge_error,
     _drift_increments,
@@ -225,23 +225,56 @@ def test_markout_truncation_is_flagged_not_silent():
     assert all(x.change == 0.0 for x in path.markout(n, horizons))
 
 
-def test_event_markout_is_undefined_when_no_print_follows():
-    """Undefined, not zero. A zero would be averaged in as "no adverse
-    selection" for every fill after the last print of the session."""
+def _layout_for_next_event(path: FairValuePath) -> bool:
+    """A move that ends before the first print, the next move ending after
+    it, and a move informing after the last print."""
+    m, e = path.move_list, path.event_steps
+    return len(m) >= 2 and e.size >= 1 and m[0].end_step < e[0] < m[1].end_step and m[-1].inform_step > e[-1]
+
+
+def test_next_event_markout_runs_through_the_earlier_of_the_next_print_and_the_next_move_end():
+    """The next-event mark-out ends at the first print or move end strictly
+    after the step, contains the whole jump or ramp, and is undefined --
+    None, not zero -- when neither follows. Marking to the next print only
+    carries a move-informed fill through an unrelated print, often an hour
+    later, and calls that adverse selection; counting a move that ends on
+    the step itself marks a fill through nothing; a zero for "nothing
+    followed" is averaged in as no adverse selection."""
     cfg = GameConfig()
-    seed = next(s for s in range(200) if generate(cfg, RngStreams(s)).event_steps.size == 1)
+    seed = next(s for s in range(200) if _layout_for_next_event(generate(cfg, RngStreams(s))))
     path = generate(cfg, RngStreams(seed))
-    e = int(path.event_steps[0])
+    rel = path.relative
+    first, last = path.move_list[0], path.move_list[-1]
+    e0, e_last = int(path.event_steps[0]), int(path.event_steps[-1])
 
-    before = path.event_markout(e - 100)
-    assert before == EventMarkOut(event_index=0, event_step=e, change=path.relative[e] - path.relative[e - 100])
-    # It contains the jump: the mark is to just after the print.
-    assert abs(before.change - path.jump_sizes[0]) < 1.0  # diffusion + drift over 10 s is far below 1bp
+    lead = path.next_event_markout(first.inform_step)
+    assert lead == NextEventMarkOut(
+        kind="move", index=0, event_step=first.end_step, change=rel[first.end_step] - rel[first.inform_step]
+    )
+    # It contains the whole ramp: the mark is to the move's end.
+    assert path.moves[first.end_step] - path.moves[first.inform_step] == pytest.approx(first.total_bp)
+    assert path.next_event_markout(first.start_step + 1).event_step == first.end_step
+    # Strictly after: at a move's end the next event is the print that follows.
+    at_end = path.next_event_markout(first.end_step)
+    assert (at_end.kind, at_end.index, at_end.event_step) == ("print", 0, e0)
+    # After the last print a move still follows.
+    nxt = next(m for m in path.move_list if m.inform_step > e_last)
+    after = path.next_event_markout(e_last)
+    assert (after.kind, after.index, after.event_step) == ("move", nxt.index, nxt.end_step)
+    for step in (last.end_step, path.n_steps):
+        assert path.next_event_markout(step) == NextEventMarkOut(None, None, None, None)
 
-    at = path.event_markout(e)
-    assert at.change is None and at.event_index is None and at.event_step is None
-    assert path.event_markout(path.n_steps).change is None
-    assert generate(GameConfig(event_count_probs=(1.0,)), RngStreams(1)).event_markout(0).change is None
+    # Without moves it is the old print mark-out: through the next print.
+    no_moves = generate(GameConfig(move_rate_per_free_hour=0.0), RngStreams(seed))
+    m = no_moves.next_event_markout(first.inform_step)
+    assert (m.kind, m.index, m.event_step) == ("print", 0, e0)
+    assert m.change == no_moves.relative[e0] - no_moves.relative[first.inform_step]
+    # No prints: moves alone; nothing at all: undefined.
+    quiet = GameConfig(event_count_probs=(1.0,))
+    only_moves = next(p for p in (generate(quiet, RngStreams(s)) for s in range(50)) if p.move_list)
+    assert only_moves.next_event_markout(0).kind == "move"
+    empty = generate(GameConfig(event_count_probs=(1.0,), move_rate_per_free_hour=0.0), RngStreams(1))
+    assert empty.next_event_markout(0).change is None
 
 
 def test_start_level_invariance():
@@ -266,7 +299,7 @@ def test_start_level_invariance():
         for step in (0, 1234, 40_000, a.n_steps):
             assert other.markout(step, (100, 600, 3000)) == a.markout(step, (100, 600, 3000))
             assert other.lookahead(step, 500) == a.lookahead(step, 500)
-            assert other.event_markout(step) == a.event_markout(step)
+            assert other.next_event_markout(step) == a.next_event_markout(step)
 
 
 # --------------------------------------------------------------------------

@@ -133,32 +133,67 @@ def test_spread_captured_is_edge_against_the_truth_at_the_fill():
 
 def test_truncated_and_undefined_markouts_are_flagged_and_excluded():
     """A fill 50 s before the close has truncated 60 s and 300 s mark-outs and
-    is left out of that horizon's adverse selection and mark-out totals; a
-    fill after the last print has no event-relative mark-out -- None, not
-    zero -- and is left out of that one. Averaging truncated values in makes
-    late fills look harmless; a zero for "no print followed" drags the
-    event-relative average toward nothing."""
+    is left out of that horizon's adverse selection and mark-out totals. A
+    fill after the last print but before a move ends marks through the move;
+    one at or after the last move's end, with no print after it either, has
+    no next-event mark-out -- None, not zero -- and is left out of that one.
+    Averaging truncated values in makes late fills look harmless; a zero for
+    "nothing followed" drags the next-event average toward nothing; a
+    horizon that ignored moves would drop every fill after the last print."""
     cfg = GameConfig()
-    w = world.generate(cfg, 3)
     n = cfg.n_steps
-    last_print = int(w.path.event_steps[-1])
+    w = next(
+        w for w in (world.generate(cfg, s) for s in range(100))
+        if w.path.move_list and w.path.event_steps.size
+        and w.path.move_list[-1].inform_step > w.path.event_steps[-1] and w.path.event_steps[-1] < n - 500
+    )
+    last = w.path.move_list[-1]
+    at = w.path.public.screen_at
     trades = [
-        Trade(0, 100, Source.CLIENT, 10, w.path.public.screen_at(100), 0, 0.0, 10),
-        Trade(1, n - 500, Source.CLIENT, -10, w.path.public.screen_at(n - 500), 1, 0.0, 0),
-        Trade(2, last_print + 10, Source.CLIENT, 5, w.path.public.screen_at(last_print + 10), 2, 0.0, 5),
-        Trade(3, n, Source.CLOSE, -5, w.path.public.screen_at(n) - 1.0, None, 1.0, 0),
+        Trade(0, 100, Source.CLIENT, 10, at(100), 0, 0.0, 10),
+        Trade(1, n - 500, Source.CLIENT, -10, at(n - 500), 1, 0.0, 0),
+        Trade(2, last.inform_step, Source.CLIENT, 5, at(last.inform_step), 2, 0.0, 5),
+        Trade(3, last.end_step, Source.CLIENT, -5, at(last.end_step), 3, 0.0, 0),
+        Trade(4, n, Source.CLOSE, 0, at(n), None, 1.0, 0),
     ]
     marks = scoring.fill_markouts(cfg, w.path, trades)
+    ne = scoring.NEXT_EVENT
     assert marks[0]["300s"]["truncated"] is False and marks[1]["300s"]["truncated"] is True
     assert marks[1]["10s"]["truncated"] is False
-    assert marks[0]["event"]["pnl_bp"] is not None
-    assert marks[1]["event"]["pnl_bp"] is None and marks[2]["event"]["pnl_bp"] is None
-    dec = scoring.decomposition(cfg, w.path, w.path.public.screen_at, trades, {0: "uninformed", 1: "uninformed", 2: "uninformed"})
+    assert marks[0][ne]["pnl_bp"] is not None
+    assert marks[2][ne]["through"] == {"kind": "move", "index": last.index, "step": last.end_step}
+    rel = w.path.relative
+    assert marks[2][ne]["pnl_bp"] == 5 * (rel[last.end_step] - rel[last.inform_step])
+    assert marks[1][ne] == {"pnl_bp": None, "through": None} and marks[3][ne] == {"pnl_bp": None, "through": None}
+    types = {i: "uninformed" for i in range(4)}
+    dec = scoring.decomposition(cfg, w.path, w.path.public.screen_at, trades, types)
     assert dec["by_horizon"]["300s"]["fills_excluded"] == 1
     assert dec["by_horizon"]["10s"]["fills_excluded"] == 0
-    assert dec["by_horizon"]["event"]["fills_excluded"] == 2
-    expected_300 = marks[0]["300s"]["pnl_bp"] + marks[2]["300s"]["pnl_bp"]
+    assert dec["by_horizon"][ne]["fills_excluded"] == 2
+    expected_300 = sum(marks[i]["300s"]["pnl_bp"] for i in (0, 2, 3))
     assert dec["by_horizon"]["300s"]["adverse_selection_usd"] == pytest.approx(expected_300 * cfg.dollars_per_bp_per_lot)
+    expected_next = marks[0][ne]["pnl_bp"] + marks[2][ne]["pnl_bp"]
+    assert dec["by_horizon"][ne]["adverse_selection_usd"] == pytest.approx(expected_next * cfg.dollars_per_bp_per_lot)
+
+
+@pytest.mark.parametrize("cfg,seed,bot,quit_at", SESSIONS)
+def test_client_table_adds_up_to_the_decomposition(cfg, seed, bot, quit_at):
+    """The per-client mark-outs sum, at 60 s, 300 s and the next event, to
+    the decomposition's adverse selection at that horizon, with the same
+    fills excluded; your net lots per client -- your side, positive when you
+    bought -- sum to your net client fills. A client table on its own
+    horizon definition, or with the client's side instead of yours, reads
+    plausibly row by row and contradicts the decomposition above it."""
+    w, s = played(cfg, seed, bot, quit_at)
+    dec = decompose(cfg, w, s.book.trades)
+    clients = scoring.diagnostics(w, s.log, s.book.trades)["clients"].values()
+    for key in ("60s", "300s", scoring.NEXT_EVENT):
+        h = dec["by_horizon"][key]
+        assert sum(c["markouts_usd"][key] for c in clients) == pytest.approx(h["adverse_selection_usd"], abs=0.005), key
+        assert sum(c["markouts_excluded"][key] for c in clients) == h["fills_excluded"], key
+    fills = [t for t in s.book.trades if t.source is Source.CLIENT]
+    assert fills and sum(c["net_lots"] for c in clients) == sum(t.quantity for t in fills)
+    assert sum(c["lots"] for c in clients) == sum(abs(t.quantity) for t in fills)
 
 
 # --------------------------------------------------------------------------

@@ -12,10 +12,10 @@ paired comparison, not a statistical one:
 - **Flow oracle**: the disciplined bot plus knowledge of which RFQs are
   informed -- and nothing else: not about what, not which way, not the truth.
   It quotes informed RFQs wide, learns the client's side where the outcome
-  shows it, and leans its quote mid that way for a few minutes. It never
-  trades on the venue in the direction of a lean: shading quotes is market
-  making, trading the view through the venue is not. The capture ratio is
-  measured against it.
+  shows it, and leans its quote mid that way for a few minutes. Its venue
+  trades are exactly the disciplined bot's, all of them risk-reducing:
+  shading quotes is market making, trading the view through the venue is
+  not. The capture ratio is measured against it.
 - **Passing oracle**: the same knowledge, used only to decline informed
   RFQs. A diagnostic: how much is avoiding toxic flow worth, as opposed to
   reading it.
@@ -259,13 +259,13 @@ class FlowOracle(Disciplined):
     mid that way by ``oracle_lean_bp`` for ``oracle_lean_s``: it buys a
     little more readily from the crowd when an informed client is buying.
 
-    It reads flow through its quotes only. Its venue trades follow the
-    disciplined rules -- carry into prints, the inventory cap, flat before
-    the close -- and any that would go the way of an active lean is dropped:
-    shading quotes is market making, trading the view through the venue is
-    not. Every lean is logged, so that rule can be audited after the fact.
-    Like the passing oracle it drops the run-up widening, the disciplined
-    bot's stand-in for the knowledge it has.
+    It reads flow through its quotes only. Its venue trades are exactly the
+    disciplined bot's -- the inventory cap, carry into prints, flat before
+    the close -- every one of which only cuts the position, so it never
+    trades a view on the venue, and never declines to cut risk because a
+    lean points the other way. Every lean is logged for the review. Like the
+    passing oracle it drops the run-up widening, the disciplined bot's
+    stand-in for the knowledge it has.
     """
 
     def __init__(self, config: GameConfig, benchmark: BenchmarkConfig, informed: frozenset[int]) -> None:
@@ -309,17 +309,6 @@ class FlowOracle(Disciplined):
         )
         width = self.half_width(ticket, state) + (self.widen_bp if informed else 0.0)
         return _two_way(self.config, ticket["ordinal"], mid, width)
-
-    def _venue(self, actions, state):
-        """Drop any hedge that would trade the way of the active lean."""
-        d = self.leaning(state["step"])
-        return [a for a in actions if not (a["type"] == "hedge" and d and (a["quantity"] > 0) == (d > 0))]
-
-    def after_answer(self, state):
-        return self._venue(super().after_answer(state), state)
-
-    def on_wake(self, state, wake):
-        return self._venue(super().on_wake(state, wake), state)
 
 
 class Trend(Disciplined):

@@ -279,7 +279,8 @@ def test_summary_reveals_moves_and_every_client():
     """The summary reveals each unannounced move in its own line under
     "Position, prints and moves" -- size, ramp, warning, the position, the
     informed RFQs that foretold it -- and lists every client with true type
-    and what they knew. A record that kept moves only in the JSON would hide
+    and what they knew, net lots labelled as yours. Mark-outs read through
+    the next event. A record that kept moves only in the JSON would hide
     the lesson from the review that reads the summary."""
     cfg = GameConfig.for_session(120)
     seed = next(s for s in range(100) if len(world.generate(cfg, s).path.move_list) >= 2)
@@ -294,6 +295,8 @@ def test_summary_reveals_moves_and_every_client():
     table = [l for l in summary.splitlines() if l.startswith("| ") and l.split("|")[1].strip().isdigit()]
     assert len(table) >= cfg.n_clients
     assert "| Client | Category | True type |" in summary
+    assert "| Your net lots | 60s | 300s | Next event |" in summary
+    assert "| | 10s | 60s | 300s | next event |" in summary
 
 
 def test_reveal_is_sent_once_and_only_after_the_end(drill_game):

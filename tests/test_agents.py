@@ -118,49 +118,60 @@ def test_flow_oracle_quotes_informed_wide_and_leans_with_what_it_learns():
     assert o.leans == [(100, 1, 100 + round(BENCH.oracle_lean_s / cfg.dt))]
 
 
-@pytest.mark.parametrize("seed", range(12))
-def test_flow_oracle_never_trades_on_the_venue_the_way_of_an_active_lean(seed):
-    """Audited from the oracle's own logged leans: no hedge it sends goes
-    the direction of a lean active at that step. Its venue trades follow
-    the disciplined rules only -- shading quotes is market making, trading
-    the view through the venue is not -- so a hedge riding the informed
-    client's direction would be the benchmark trading information. The next
-    test checks the audit had something to audit."""
+HEDGE_SEEDS = range(12)
+
+
+def oracle_session(seed: int):
     cfg = GameConfig()
     w = world.generate(cfg, seed)
     session = agents.Session(w.public, w.resolve, settings=Settings(), scoring=SCORING)
     bot = agents.FlowOracle(cfg, BENCH, w.informed_ordinals())
     agents.play(session, bot)
+    return session, bot
 
-    def active(step):
-        lean = 0
-        for start, direction, until in bot.leans:
-            if start <= step:
-                lean = direction if step <= until else 0
-        return lean
 
+@pytest.mark.parametrize("seed", HEDGE_SEEDS)
+def test_every_flow_oracle_hedge_cuts_its_position_and_never_flips_it(seed):
+    """Every venue trade the flow oracle asks for, and every one it gets,
+    reduces |position| without taking it through zero, and it is flat
+    before the close, so the closing liquidation trades nothing. Its hedges
+    are the disciplined bot's -- the inventory cap, carry into a print, flat
+    before the close -- every one risk-reducing: a hedge that added to the
+    position or turned it round would be the benchmark trading a view on
+    the venue. The next test checks the cases this covers occurred."""
+    session, _ = oracle_session(seed)
     for e in session.log.of(Kind.HEDGE_EXECUTED):
-        d = active(e.step)
-        if d:
-            assert (e.data["requested"] > 0) != (d > 0), (e.step, e.data, d)
+        before = e.data["position_after"] - e.data["quantity"]
+        for after in (before + e.data["requested"], e.data["position_after"]):
+            assert abs(after) < abs(before) and after * before >= 0, (e.step, e.data)
+    assert session.log.of(Kind.CLOSE_LIQUIDATION)[0].data["quantity"] == 0
 
 
-def test_the_lean_audit_was_exercised():
-    """Across the audited sessions some hedges fell inside an active lean,
-    so the rule was tested rather than passed vacuously."""
-    total = 0
+def test_the_hedge_check_had_cases_including_hedges_the_way_of_a_lean():
+    """Across the checked sessions the oracle hedged for every reason -- the
+    cap, carry into a print, flat before the close -- and some of those
+    hedges went the way of a lean active at the time: cutting inventory it
+    had taken against its own lean. So the check above was not passed
+    vacuously; and a rule that held such hedges back -- leaving the oracle
+    carrying risk the disciplined bot would have cut -- fails here."""
     cfg = GameConfig()
-    for seed in range(12):
-        w = world.generate(cfg, seed)
-        session = agents.Session(w.public, w.resolve, settings=Settings(), scoring=SCORING)
-        bot = agents.FlowOracle(cfg, BENCH, w.informed_ordinals())
-        agents.play(session, bot)
+    dt = cfg.dt
+    kinds = {"cap": 0, "carry": 0, "close": 0}
+    with_lean = 0
+    for seed in HEDGE_SEEDS:
+        session, bot = oracle_session(seed)
         for e in session.log.of(Kind.HEDGE_EXECUTED):
-            for start, direction, until in bot.leans:
-                if start <= e.step <= until:
-                    total += 1
-                    break
-    assert total > 0
+            if e.step == bot.close_wake:
+                kinds["close"] += 1
+            elif e.step in bot.print_wakes:
+                kinds["carry"] += 1
+            else:
+                kinds["cap"] += 1
+            active = [d for start, d, until in bot.leans if start <= e.step <= until]
+            with_lean += bool(active) and (e.data["requested"] > 0) == (active[-1] > 0)
+    assert all(kinds.values()), kinds
+    assert with_lean > 0
+    assert bot.close_wake == cfg.n_steps - round(BENCH.disciplined_close_lead_s / dt)
 
 
 def test_disciplined_hedges_toward_the_carry_before_prints_and_flattens_before_the_close():

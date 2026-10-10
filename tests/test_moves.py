@@ -243,6 +243,27 @@ def test_each_request_is_informed_about_at_most_one_thing(minutes):
     assert move_informed > 30
 
 
+@pytest.mark.parametrize("minutes", [60, 120])
+def test_an_informed_fill_marks_through_the_thing_it_was_informed_about(minutes):
+    """Every informed RFQ's next event -- the horizon its fill is marked
+    through -- is the print or move its client knew about: a move's window
+    never overlaps a print's run-up, so a print-informed fill marks through
+    its print and a move-informed one through its move. A horizon that ran
+    to the next print only would carry a move-informed fill through an
+    unrelated print and call that print's jump the client's information."""
+    cfg = GameConfig.for_session(minutes)
+    checked = {"print": 0, "move": 0}
+    for seed in range(40):
+        p = generate(cfg, RngStreams(seed))
+        for q in flow.generate(cfg, RngStreams(seed), p).rfqs:
+            if q.informed_about is None:
+                continue
+            ev = p.next_event_markout(q.step)
+            assert (ev.kind, ev.index) == (q.informed_about.kind, q.informed_about.index), (seed, q.ordinal)
+            checked[q.informed_about.kind] += 1
+    assert checked["print"] > 30 and checked["move"] > 30
+
+
 def test_move_signals_are_one_view_per_client_and_move_and_right_eighty_percent():
     """Every inquiry a client sends about one move carries the same view,
     drawn from the move stream keyed on (client, candidate); the view's sign

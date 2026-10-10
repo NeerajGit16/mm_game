@@ -138,17 +138,21 @@ def ex_ante_penalty_usd(
     return {"diffusion_usd": diffusion, "prints_usd": prints, "total_usd": diffusion + prints}
 
 
+NEXT_EVENT = "next_event"
+
+
 def _fill_markouts(config: GameConfig, path: FairValuePath, step: int, quantity: int) -> dict[str, Any]:
-    """Signed mark-out P&L of one fill, bp-lots, at each horizon and to just
-    after the next print. Truncated horizons are flagged; the event mark-out
-    is None when no print follows -- undefined, not zero."""
+    """Signed mark-out P&L of one fill, bp-lots, at each horizon and through
+    the next event -- the next print or move end, whichever comes first.
+    Truncated horizons are flagged; the next-event mark-out is None when
+    neither follows before the close -- undefined, not zero."""
     out: dict[str, Any] = {}
     for h_s, m in zip(config.markout_horizons_s, path.markout(step, config.markout_horizons_steps)):
         out[f"{h_s:g}s"] = {"pnl_bp": quantity * m.change, "truncated": m.truncated}
-    ev = path.event_markout(step)
-    out["event"] = {
+    ev = path.next_event_markout(step)
+    out[NEXT_EVENT] = {
         "pnl_bp": None if ev.change is None else quantity * ev.change,
-        "print_index": ev.event_index,
+        "through": None if ev.kind is None else {"kind": ev.kind, "index": ev.index, "step": ev.event_step},
     }
     return out
 
@@ -163,7 +167,7 @@ def fill_markouts(config: GameConfig, path: FairValuePath, trades: Sequence[Trad
 
 
 def horizon_keys(config: GameConfig) -> list[str]:
-    return [f"{h:g}s" for h in config.markout_horizons_s] + ["event"]
+    return [f"{h:g}s" for h in config.markout_horizons_s] + [NEXT_EVENT]
 
 
 # Counterparty types, for splitting fills: who was on the other side.
@@ -207,9 +211,9 @@ def decomposition(
     and sums to the cent. Adverse selection is also split by who was on the
     other side (``types``: RFQ ordinal to uninformed / informed_print /
     informed_move), and those lines sum to it. Fills whose mark-out is
-    truncated by the close, or has no print after it (event-relative), are
-    excluded from adverse selection and counted; their moves stay in
-    inventory, so nothing is lost.
+    truncated by the close, or has no print or move end after it (next
+    event), are excluded from adverse selection and counted; their moves
+    stay in inventory, so nothing is lost.
     """
     usd = config.dollars_per_bp_per_lot
     level = config.start_level
@@ -493,6 +497,8 @@ def diagnostics(world, events, trades: Sequence[Trade]) -> dict[str, Any]:
         )
 
     # Clients: what each did with you, and -- revealed -- what they knew.
+    # net_lots is your side: positive when you bought from the client.
+    client_horizons = ("60s", "300s", NEXT_EVENT)
     clients = {}
     for c in world.schedule.clients:
         clients[c.client_id] = {
@@ -503,8 +509,8 @@ def diagnostics(world, events, trades: Sequence[Trade]) -> dict[str, Any]:
             "won": 0,
             "lots": 0,
             "net_lots": 0,
-            "markouts_usd": {k: 0.0 for k in ("60s", "300s", "event")},
-            "markouts_excluded": {k: 0 for k in ("60s", "300s", "event")},
+            "markouts_usd": {k: 0.0 for k in client_horizons},
+            "markouts_excluded": {k: 0 for k in client_horizons},
             "informed_about": [],
         }
     for ordinal, row in table.items():

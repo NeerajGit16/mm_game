@@ -117,15 +117,19 @@ class MarkOut:
 
 
 @dataclass(frozen=True)
-class EventMarkOut:
-    """Fair value change from a step to just after the next print.
+class NextEventMarkOut:
+    """Fair value change from a step through the next event: the next print
+    or the end of the next unannounced move, whichever comes first.
 
     Measured to the event step itself, where the path already includes the
-    jump. ``change`` is ``None`` when no print follows the step: that mark-out
-    is undefined, not zero, and must be recorded as such.
+    jump or the whole ramp. ``kind`` is "print" or "move" and ``index`` its
+    index among the prints or the moves. Everything is ``None`` when neither
+    follows the step: that mark-out is undefined, not zero, and must be
+    recorded as such.
     """
 
-    event_index: int | None
+    kind: str | None
+    index: int | None
     event_step: int | None
     change: float | None
 
@@ -279,16 +283,29 @@ class FairValuePath:
             )
         return tuple(out)
 
-    def event_markout(self, step: int) -> EventMarkOut:
-        """Change from ``step`` to just after the next print, or undefined."""
+    def next_event_markout(self, step: int) -> NextEventMarkOut:
+        """Change from ``step`` through the first print or move end strictly
+        after it, or undefined when neither follows.
+
+        A move's informing window never overlaps a print's run-up, so a fill
+        informed about a print marks through that print and one informed
+        about a move marks through the end of that move.
+        """
         self._check_step(step)
+        candidates = []
         later = np.flatnonzero(self.event_steps > step)
-        if later.size == 0:
-            return EventMarkOut(event_index=None, event_step=None, change=None)
-        i = int(later[0])
-        e = int(self.event_steps[i])
-        return EventMarkOut(
-            event_index=i,
+        if later.size:
+            i = int(later[0])
+            candidates.append((int(self.event_steps[i]), "print", i))
+        ends = [(m.end_step, "move", m.index) for m in self.move_list if m.end_step > step]
+        if ends:
+            candidates.append(min(ends))
+        if not candidates:
+            return NextEventMarkOut(kind=None, index=None, event_step=None, change=None)
+        e, kind, index = min(candidates)
+        return NextEventMarkOut(
+            kind=kind,
+            index=index,
             event_step=e,
             change=float(self.relative[e] - self.relative[step]),
         )
