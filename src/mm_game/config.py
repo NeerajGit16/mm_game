@@ -21,8 +21,19 @@ lets ``GameConfig(dt=-1)`` construct silently under that flag.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from dataclasses import dataclass
+from typing import Any, Mapping
+
+# Layout of the config records written into every session header. A loader
+# refuses any other version, and refuses a record whose field set differs from
+# this code's: when spreads, tolerances and costs moved from ticks to bp the
+# fields were renamed, and a header read under the wrong layout would not fail
+# loudly -- it would load different economics, or fill a missing field with
+# today's default and regenerate a different world. Bump on any rename,
+# removal or change of meaning.
+CONFIG_SCHEMA_VERSION: int = 1
 
 # Relative tolerance for the grid-divisibility checks. Float division carries at
 # most about 1 ulp (~1e-16) of error, so this is generous to rounding and still
@@ -43,6 +54,31 @@ def _whole_steps(seconds: float, dt: float, what: str) -> int:
             f"{what} must be a whole number of steps, got {seconds} / {dt} = {seconds / dt}"
         )
     return steps
+
+
+def _to_record(obj: object) -> dict[str, Any]:
+    """Plain-type field values for a header: tuples become lists."""
+    return {
+        f.name: list(v) if isinstance(v := getattr(obj, f.name), tuple) else v
+        for f in dataclasses.fields(obj)  # type: ignore[arg-type]
+    }
+
+
+def _from_record(cls: type, record: Mapping[str, Any]) -> Any:
+    """Rebuild a config from a header record, refusing any field-set mismatch.
+
+    Strict on purpose: a missing field silently taking today's default, or an
+    unknown one silently dropped, is exactly how an old header would replay a
+    different session without an error.
+    """
+    expected = {f.name for f in dataclasses.fields(cls)}
+    missing, unknown = expected - set(record), set(record) - expected
+    if missing or unknown:
+        raise ValueError(
+            f"{cls.__name__} record does not match this schema: "
+            f"missing {sorted(missing)}, unknown {sorted(unknown)}"
+        )
+    return cls(**record)
 
 
 @dataclass(frozen=True)
@@ -669,6 +705,118 @@ class GameConfig:
         if minutes not in SESSION_PRESETS:
             raise ValueError(f"no preset for {minutes} minutes; have {sorted(SESSION_PRESETS)}")
         return cls(**{**SESSION_PRESETS[minutes], **overrides})
+
+    def to_record(self) -> dict[str, Any]:
+        return _to_record(self)
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, Any]) -> GameConfig:
+        return _from_record(cls, record)
+
+
+@dataclass(frozen=True)
+class ScoringConfig:
+    """How a finished session is scored.
+
+    Not part of the world: nothing here changes a generated number, so it is
+    kept out of ``GameConfig`` -- changing it re-scores every recorded session
+    from its replay file, and does not make a replayed seed look like a new
+    scenario.
+    """
+
+    # Risk-adjusted P&L = P&L - kappa * (expected variance of the positions
+    # held, in dollars squared): diffusion variance accrued over time plus the
+    # print variance E[J^2] for the position held through each print. At
+    # 2.1e-5 and $50/bp/lot a print costs about $0.5 * q^2 -- $1,250 for 50
+    # lots, $5,000 for 100 -- so the marginal penalty at 50 lots, ~$50 a lot,
+    # matches the 1bp hedge cost and the best carry into a print is ~50 lots.
+    risk_kappa: float = 2.1e-5
+    # The mark-out horizon used for the adverse-selection line of the P&L
+    # decomposition. The decomposition is computed at every horizon; this is
+    # the one shown first.
+    decomposition_horizon_s: float = 300.0
+    # Below this oracle-minus-disciplined gap (in dollars, on the score being
+    # compared) the flow-reading capture ratio is reported as n/a: a session
+    # with little informed flow has nothing to capture, and the ratio of two
+    # noise terms is not a measurement.
+    capture_ratio_min_usd: float = 2000.0
+
+    def __post_init__(self) -> None:
+        if not (math.isfinite(self.risk_kappa) and self.risk_kappa >= 0):
+            raise ValueError(f"risk_kappa must be finite and non-negative, got {self.risk_kappa}")
+        if not (math.isfinite(self.decomposition_horizon_s) and self.decomposition_horizon_s > 0):
+            raise ValueError(f"decomposition_horizon_s must be positive, got {self.decomposition_horizon_s}")
+        if not (math.isfinite(self.capture_ratio_min_usd) and self.capture_ratio_min_usd > 0):
+            raise ValueError(f"capture_ratio_min_usd must be positive, got {self.capture_ratio_min_usd}")
+
+    def to_record(self) -> dict[str, Any]:
+        return _to_record(self)
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, Any]) -> ScoringConfig:
+        return _from_record(cls, record)
+
+
+@dataclass(frozen=True)
+class BenchmarkConfig:
+    """The benchmark players' fixed parameters.
+
+    Fixed for every session and never tuned to a seed: a benchmark tuned per
+    seed would be looking at the answers. Kept out of ``GameConfig`` for the
+    same reason as scoring -- improving a bot re-benchmarks the whole history
+    without touching any world.
+    """
+
+    # Naive: a fixed half-width around the screen, never hedges.
+    naive_half_width_bp: float = 0.5
+    # Disciplined: public information only. Values from a coordinate search
+    # on training seeds disjoint from any evaluation, objective mean
+    # risk-adjusted P&L per hour across the three presets; fixed thereafter.
+    # Half-width by the number of dealers in competition, 0, 1, 2, 3.
+    disciplined_half_width_bp: tuple[float, ...] = (0.75, 0.5, 0.5, 0.5)
+    # Extra half-width per 100 lots of ticket.
+    disciplined_size_widen_bp: float = 0.25
+    # Extra half-width in the run-up to a print -- the bot's stand-in for
+    # the informed clients it cannot tell apart -- and right around it.
+    disciplined_pre_print_window_s: float = 600.0
+    disciplined_pre_print_widen_bp: float = 0.5
+    disciplined_print_window_s: float = 120.0
+    disciplined_print_widen_bp: float = 0.0
+    # Quote mid moved against inventory, bp per 100 lots held: at 0.75 a
+    # 30-lot position leans the quotes about a tick. The single biggest
+    # lever in the search -- without it the bot carries whatever the flow
+    # leaves it into every print.
+    disciplined_skew_bp_per_100_lots: float = 0.75
+    # Hedge toward this carry before each print, this far ahead of it --
+    # outside the venue's widening window.
+    disciplined_print_carry_lots: int = 25
+    disciplined_hedge_lead_s: float = 180.0
+    # After any fill, hedge back to the target if beyond the cap.
+    disciplined_inventory_cap_lots: int = 100
+    disciplined_inventory_target_lots: int = 100
+    # Flatten this far before the close rather than pay the closing multiplier.
+    disciplined_close_lead_s: float = 120.0
+
+    def __post_init__(self) -> None:
+        widths = tuple(float(w) for w in self.disciplined_half_width_bp)
+        object.__setattr__(self, "disciplined_half_width_bp", widths)
+        if not widths or not all(math.isfinite(w) and w > 0 for w in widths):
+            raise ValueError(f"disciplined_half_width_bp must be positive, got {widths}")
+        for f in dataclasses.fields(self):
+            value = getattr(self, f.name)
+            if isinstance(value, (int, float)) and not (math.isfinite(value) and value >= 0):
+                raise ValueError(f"{f.name} must be finite and non-negative, got {value}")
+        if not self.naive_half_width_bp > 0:
+            raise ValueError("naive_half_width_bp must be positive")
+        if self.disciplined_inventory_target_lots > self.disciplined_inventory_cap_lots:
+            raise ValueError("disciplined_inventory_target_lots must not exceed the cap")
+
+    def to_record(self) -> dict[str, Any]:
+        return _to_record(self)
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, Any]) -> BenchmarkConfig:
+        return _from_record(cls, record)
 
 
 # Session-length presets. Explicit per preset so every value is visible and
