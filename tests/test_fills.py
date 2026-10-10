@@ -102,7 +102,7 @@ def make_rfq(
         side=side,
         informed=informed,
         signal_bp=None,
-        event_index=None,
+        informed_about=None,
         base_size=float(size),
         dealers_in_comp=dealers,
     )
@@ -207,7 +207,7 @@ def test_competitors_use_only_public_information():
                     q,
                     informed=False,
                     signal_bp=None,
-                    event_index=None,
+                    informed_about=None,
                     side=Side.SELL if q.side is Side.BUY else Side.BUY,
                 )
                 for q in schedule.rfqs

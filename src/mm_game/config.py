@@ -32,8 +32,9 @@ from typing import Any, Mapping
 # fields were renamed, and a header read under the wrong layout would not fail
 # loudly -- it would load different economics, or fill a missing field with
 # today's default and regenerate a different world. Bump on any rename,
-# removal or change of meaning.
-CONFIG_SCHEMA_VERSION: int = 1
+# removal or change of meaning, or any new field that changes what a session
+# generates. Version 2 added unannounced moves.
+CONFIG_SCHEMA_VERSION: int = 2
 
 # Relative tolerance for the grid-divisibility checks. Float division carries at
 # most about 1 ulp (~1e-16) of error, so this is generous to rounding and still
@@ -156,6 +157,31 @@ class GameConfig:
     drift_duration_max_s: float = 40 * 60.0
     drift_magnitude_min_bp: float = 1.0
     drift_magnitude_max_bp: float = 2.0
+
+    # -- Unannounced moves -----------------------------------------------------
+    # Headline moves nobody announces: print-sized, over 30-60 seconds,
+    # permanent, sign 50/50, leaked to informed clients 2-5 minutes ahead.
+    # Never on the screen as news, never on the calendar, never in the
+    # print-risk gauge. A move's informing window [start - lead, start +
+    # duration) must lie entirely in free time: the session less its first
+    # and last edge margin, less each print's run-up and the clearance after
+    # it -- so an inquiry is informed about one thing at a time -- and at
+    # least the minimum gap from any other move's window. Candidates are a
+    # Poisson count at move_rate_per_free_hour over the free time, so the
+    # blocking does not eat the rate; see SESSION_PRESETS for the rate per
+    # preset. The ramp is short because a longer one shows on the screen
+    # while it runs: at 1-3 minutes a public trend-follower caught about a
+    # third as much as the flow oracle; at 30-60 seconds, nothing.
+    move_rate_per_free_hour: float = 2.0
+    move_magnitude_min_bp: float = 2.0
+    move_magnitude_max_bp: float = 3.5
+    move_duration_min_s: float = 30.0
+    move_duration_max_s: float = 60.0
+    move_lead_min_s: float = 2 * 60.0
+    move_lead_max_s: float = 5 * 60.0
+    move_edge_margin_s: float = 5 * 60.0
+    move_print_clearance_s: float = 5 * 60.0
+    move_min_gap_s: float = 5 * 60.0
 
     # -- Screen ----------------------------------------------------------------
     # Fair value plus a persistent observation error, sampled every
@@ -409,6 +435,23 @@ class GameConfig:
                 "drift magnitudes must satisfy 0 <= min <= max, got "
                 f"{self.drift_magnitude_min_bp} and {self.drift_magnitude_max_bp}"
             )
+
+        # Unannounced moves.
+        if not (math.isfinite(self.move_rate_per_free_hour) and self.move_rate_per_free_hour >= 0):
+            raise ValueError(f"move_rate_per_free_hour must be finite and non-negative, got {self.move_rate_per_free_hour}")
+        for lo_name, hi_name, positive in (
+            ("move_magnitude_min_bp", "move_magnitude_max_bp", False),
+            ("move_duration_min_s", "move_duration_max_s", True),
+            ("move_lead_min_s", "move_lead_max_s", False),
+        ):
+            lo, hi = getattr(self, lo_name), getattr(self, hi_name)
+            floor_ok = lo > 0 if positive else lo >= 0
+            if not (math.isfinite(hi) and floor_ok and lo <= hi):
+                raise ValueError(f"{lo_name} and {hi_name} must satisfy {'0 <' if positive else '0 <='} min <= max, got {lo} and {hi}")
+        for name in ("move_edge_margin_s", "move_print_clearance_s", "move_min_gap_s"):
+            value = getattr(self, name)
+            if not (math.isfinite(value) and value >= 0):
+                raise ValueError(f"{name} must be finite and non-negative, got {value}")
 
         # Screen.
         if not (math.isfinite(self.screen_noise_bp) and self.screen_noise_bp >= 0):
@@ -770,16 +813,17 @@ class BenchmarkConfig:
     # Naive: a fixed half-width around the screen, never hedges.
     naive_half_width_bp: float = 0.5
     # Disciplined: public information only. Values from a coordinate search
-    # on training seeds disjoint from any evaluation, objective mean
-    # risk-adjusted P&L per hour across the three presets; fixed thereafter.
+    # with unannounced moves on, on training seeds disjoint from any
+    # evaluation, objective mean risk-adjusted P&L per hour across the three
+    # presets; fixed thereafter.
     # Half-width by the number of dealers in competition, 0, 1, 2, 3.
-    disciplined_half_width_bp: tuple[float, ...] = (0.75, 0.5, 0.5, 0.5)
+    disciplined_half_width_bp: tuple[float, ...] = (1.0, 0.5, 0.5, 0.5)
     # Extra half-width per 100 lots of ticket.
     disciplined_size_widen_bp: float = 0.25
     # Extra half-width in the run-up to a print -- the bot's stand-in for
     # the informed clients it cannot tell apart -- and right around it.
     disciplined_pre_print_window_s: float = 600.0
-    disciplined_pre_print_widen_bp: float = 0.5
+    disciplined_pre_print_widen_bp: float = 0.25
     disciplined_print_window_s: float = 120.0
     disciplined_print_widen_bp: float = 0.0
     # Quote mid moved against inventory, bp per 100 lots held: at 0.75 a
@@ -796,6 +840,15 @@ class BenchmarkConfig:
     disciplined_inventory_target_lots: int = 100
     # Flatten this far before the close rather than pay the closing multiplier.
     disciplined_close_lead_s: float = 120.0
+    # Flow oracle: the disciplined bot told which RFQs are informed -- not
+    # about what, not which way. It quotes them this much wider, learns the
+    # client's side where the outcome shows it, and leans its quote mid that
+    # way by oracle_lean_bp for oracle_lean_s. It drops the run-up widening,
+    # the disciplined bot's stand-in for knowledge the oracle has. Tuned on
+    # training seeds on top of the disciplined parameters above.
+    oracle_informed_widen_bp: float = 0.5
+    oracle_lean_bp: float = 0.25
+    oracle_lean_s: float = 300.0
 
     def __post_init__(self) -> None:
         widths = tuple(float(w) for w in self.disciplined_half_width_bp)
@@ -826,8 +879,15 @@ class BenchmarkConfig:
 # The 30-minute preset is an EVENT DRILL, not a short version of the full
 # game: exactly one print, landing between minute 10 and minute 20, with a
 # 5-15 minute drift running into it, so every drill session carries one
-# event to manage and some aftermath to trade. The 60- and 120-minute
-# presets fit up to two prints under the default event bounds.
+# event to manage and some aftermath to trade -- and no unannounced moves.
+# The 60- and 120-minute presets fit up to two prints under the default
+# event bounds.
+#
+# The move rate is set per preset. Prints and their run-ups leave a 60-minute
+# session only ~22 free minutes against ~76 in two hours, so one rate cannot
+# give both about one move per hour-long session and a flow oracle edge of
+# about 30% over two hours: 3 per free hour gives ~1.0 move per 60-minute
+# session, 2 gives ~2.6 per 120-minute session.
 SESSION_PRESETS: dict[int, dict[str, object]] = {
     30: {
         "session_length": 1800,
@@ -839,6 +899,7 @@ SESSION_PRESETS: dict[int, dict[str, object]] = {
         "n_hedge_funds": 2,
         "n_real_money": 3,
         "n_corporates": 1,
+        "move_rate_per_free_hour": 0.0,
     },
     60: {
         "session_length": 3600,
@@ -846,6 +907,7 @@ SESSION_PRESETS: dict[int, dict[str, object]] = {
         "n_hedge_funds": 4,
         "n_real_money": 3,
         "n_corporates": 3,
+        "move_rate_per_free_hour": 3.0,
     },
     120: {
         "session_length": 7200,
@@ -853,6 +915,7 @@ SESSION_PRESETS: dict[int, dict[str, object]] = {
         "n_hedge_funds": 6,
         "n_real_money": 6,
         "n_corporates": 4,
+        "move_rate_per_free_hour": 2.0,
     },
 }
 

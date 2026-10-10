@@ -85,6 +85,23 @@ class DriftWindow:
 
 
 @dataclass(frozen=True)
+class Move:
+    """An unannounced move: a linear ramp of ``total_bp`` over
+    ``(start_step, end_step]``, foretold by flow from ``inform_step``.
+    Hidden, never on the calendar. ``candidate`` is the candidate ordinal it
+    was drawn as -- its identity for anything keyed on it, stable when
+    thinning keeps or drops other candidates; ``index`` is its place among
+    the moves kept."""
+
+    index: int
+    candidate: int
+    inform_step: int
+    start_step: int
+    end_step: int
+    total_bp: float
+
+
+@dataclass(frozen=True)
 class MarkOut:
     """Fair value change from a step over a fixed horizon.
 
@@ -198,9 +215,11 @@ class FairValuePath:
     relative: np.ndarray  # (n_steps + 1,) values - start_level, exact
     diffusion: np.ndarray  # (n_steps + 1,) cumulative diffusion, starts at 0
     drift: np.ndarray  # (n_steps + 1,) cumulative drift, starts at 0
+    moves: np.ndarray  # (n_steps + 1,) cumulative unannounced moves, starts at 0. Hidden.
     event_steps: np.ndarray  # (n_events,) sorted, unique, in [1, n_steps]
     jump_sizes: np.ndarray  # (n_events,) signed bp. Hidden.
     drift_windows: tuple[DriftWindow, ...]
+    move_list: tuple[Move, ...]  # hidden
     # Unrounded observation error at each public.screen_steps entry. Hidden:
     # with the truth it reconstructs the screen before rounding, and the
     # competitor pricing in fills shares this error.
@@ -289,6 +308,17 @@ class FairValuePath:
                 }
                 for w in self.drift_windows
             ],
+            "moves": [
+                {
+                    "index": m.index,
+                    "candidate": m.candidate,
+                    "inform_step": m.inform_step,
+                    "start_step": m.start_step,
+                    "end_step": m.end_step,
+                    "total_bp": m.total_bp,
+                }
+                for m in self.move_list
+            ],
             "close": float(self.values[-1]),
         }
 
@@ -369,6 +399,125 @@ def _draw_drift(
         end_step=event_step,
         total_bp=direction * magnitude,
     )
+
+
+# Substream keys for MOVES: the candidate count on its own key, each
+# candidate on the next ones, so no candidate's draws depend on the count or
+# on any other candidate.
+_MOVE_COUNT_KEY: int = 0
+
+
+def _poisson_count(lam: float, u: float) -> int:
+    """Inverse CDF of a Poisson(lam) at one uniform. Written out rather
+    than left to ``Generator.poisson`` so raising the rate only ever adds
+    candidates: for a fixed uniform the count is monotone in the rate."""
+    k, p = 0, math.exp(-lam)
+    cdf = p
+    while u > cdf and k < 10_000:
+        k += 1
+        p *= lam / k
+        cdf += p
+    return k
+
+
+def free_intervals(
+    config: GameConfig, windows: Sequence[DriftWindow], event_steps: np.ndarray
+) -> list[tuple[int, int]]:
+    """Where a move's informing window may lie, as half-open step intervals:
+    the session less its first and last edge margin, less each print's
+    run-up and the clearance after the print."""
+    n = config.n_steps
+    edge = round(config.move_edge_margin_s / config.dt)
+    clearance = round(config.move_print_clearance_s / config.dt)
+    blocked = sorted((w.start_step, int(e) + clearance) for w, e in zip(windows, event_steps))
+    free, cursor = [], edge
+    for lo, hi in blocked:
+        if lo > cursor:
+            free.append((cursor, min(lo, n - edge)))
+        cursor = max(cursor, hi)
+    if cursor < n - edge:
+        free.append((cursor, n - edge))
+    return [(a, b) for a, b in free if b > a]
+
+
+def _subtract(intervals: list[tuple[int, int]], lo: int, hi: int) -> list[tuple[int, int]]:
+    """Half-open intervals less [lo, hi)."""
+    out = []
+    for a, b in intervals:
+        if hi <= a or b <= lo:
+            out.append((a, b))
+            continue
+        if a < lo:
+            out.append((a, lo))
+        if hi < b:
+            out.append((hi, b))
+    return out
+
+
+def _draw_moves(
+    config: GameConfig, rng: RngStreams, windows: Sequence[DriftWindow], event_steps: np.ndarray
+) -> tuple[Move, ...]:
+    """Unannounced moves over free time.
+
+    The count is Poisson at the rate per free hour times the free hours, by
+    inverse CDF on its own key, so raising the rate only ever adds
+    candidates. Every candidate draws a placement uniform, sign, magnitude,
+    duration and lead, in that order, from its own substream whether or not
+    it is kept -- so no candidate's draws depend on another's, and nothing
+    here touches a print, jump, drift or screen stream. The placement puts
+    the whole informing window uniformly over the positions where it fits in
+    free time, and a kept move takes its window and the minimum gap either
+    side out of free time for the candidates after it. Only a candidate that
+    fits nowhere is dropped. Deterministic given the draws and the calendar.
+    """
+    free = free_intervals(config, windows, event_steps)
+    free_hours = sum(b - a for a, b in free) * config.dt / 3600.0
+    lam = config.move_rate_per_free_hour * free_hours
+    if lam <= 0:
+        return ()
+    count = _poisson_count(lam, float(rng.substream(Stream.MOVES, _MOVE_COUNT_KEY).random()))
+    dt = config.dt
+    gap = round(config.move_min_gap_s / dt)
+    kept: list[Move] = []
+    for c in range(count):
+        gen = rng.substream(Stream.MOVES, c + 1)
+        u = float(gen.random())
+        sign = 1.0 if gen.random() < 0.5 else -1.0
+        magnitude = float(gen.uniform(config.move_magnitude_min_bp, config.move_magnitude_max_bp))
+        duration = max(1, round(float(gen.uniform(config.move_duration_min_s, config.move_duration_max_s)) / dt))
+        lead = round(float(gen.uniform(config.move_lead_min_s, config.move_lead_max_s)) / dt)
+        width = lead + duration
+        # Informing-window starts that fit: [a, b - width] in each free interval.
+        room = [(a, b - width) for a, b in free if b - width > a]
+        total = sum(hi - lo for lo, hi in room)
+        if total <= 0:
+            continue
+        x = u * total
+        for lo, hi in room:
+            if x < hi - lo:
+                inform = lo + int(x)
+                break
+            x -= hi - lo
+        else:
+            lo, hi = room[-1]
+            inform = hi - 1
+        start, end = inform + lead, inform + width
+        kept.append(Move(index=len(kept), candidate=c, inform_step=inform, start_step=start, end_step=end,
+                         total_bp=sign * magnitude))
+        # A kept move blocks its own window and the gap either side of it for
+        # every later candidate, so the gap rule thins nothing: it shapes
+        # where later moves can go.
+        free = _subtract(free, inform - gap, end + gap)
+    kept.sort(key=lambda m: m.start_step)
+    return tuple(Move(index=i, candidate=m.candidate, inform_step=m.inform_step, start_step=m.start_step,
+                      end_step=m.end_step, total_bp=m.total_bp) for i, m in enumerate(kept))
+
+
+def _move_increments(n_steps: int, moves: Sequence[Move]) -> np.ndarray:
+    inc = np.zeros(n_steps)
+    for m in moves:
+        inc[m.start_step : m.end_step] += m.total_bp / (m.end_step - m.start_step)
+    return inc
 
 
 def _drift_increments(n_steps: int, windows: Sequence[DriftWindow]) -> np.ndarray:
@@ -550,8 +699,11 @@ def generate(config: GameConfig, rng: RngStreams) -> FairValuePath:
     jump_sizes = signs * magnitudes
     drift = _cumulative(_drift_increments(n, windows))
     jumps = _cumulative(_jump_increments(n, event_steps, jump_sizes))
+    # Unannounced moves: drawn after, and independently of, everything above.
+    move_list = _draw_moves(config, rng, windows, event_steps)
+    moves = _cumulative(_move_increments(n, move_list))
 
-    relative = diffusion + drift + jumps
+    relative = diffusion + drift + jumps + moves
     values = config.start_level + relative
 
     # Screen: the truth at each observation step plus a persistent
@@ -582,9 +734,11 @@ def generate(config: GameConfig, rng: RngStreams) -> FairValuePath:
         relative=_freeze(relative),
         diffusion=_freeze(diffusion),
         drift=_freeze(drift),
+        moves=_freeze(moves),
         event_steps=event_steps,
         jump_sizes=_freeze(jump_sizes),
         drift_windows=tuple(windows),
+        move_list=move_list,
         screen_error=_freeze(screen_err),
         public=public,
     )

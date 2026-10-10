@@ -1,6 +1,6 @@
 """Benchmark players, and the loop that drives any strategy through a session.
 
-Three bots run after every session on the identical pre-generated world --
+Four bots run after every session on the identical pre-generated world --
 same RFQs, same competitors, same client limits -- so their results are a
 paired comparison, not a statistical one:
 
@@ -10,14 +10,22 @@ paired comparison, not a statistical one:
   skews against inventory; hedges toward a modest carry before each print;
   flattens and stops before the close. Good habits, no flow reading.
 - **Flow oracle**: the disciplined bot plus knowledge of which RFQs are
-  informed -- and nothing else: not the truth, not the print outcomes. An
-  oracle that knew the print would trade it through the venue, a useless
-  bound for market making. Knowing who is informed isolates exactly the skill
-  the game teaches.
+  informed -- and nothing else: not about what, not which way, not the truth.
+  It quotes informed RFQs wide, learns the client's side where the outcome
+  shows it, and leans its quote mid that way for a few minutes. It never
+  trades on the venue in the direction of a lean: shading quotes is market
+  making, trading the view through the venue is not. The capture ratio is
+  measured against it.
+- **Passing oracle**: the same knowledge, used only to decline informed
+  RFQs. A diagnostic: how much is avoiding toxic flow worth, as opposed to
+  reading it.
+
+A public trend-follower (``Trend``) is not run after sessions; it exists to
+check that nothing public predicts an unannounced move.
 
 Bots play through the same protocol as the player and see only what its
-messages say; the oracle's one extra input is handed to it explicitly. Their
-parameters are fixed in ``BenchmarkConfig`` and never tuned to a seed.
+messages say; the oracles' one extra input is handed to them explicitly.
+Their parameters are fixed in ``BenchmarkConfig`` and never tuned to a seed.
 
 Everything here is deterministic: a bot needs no randomness, and drawing any
 would need a stream of its own.
@@ -220,9 +228,9 @@ class Disciplined(Strategy):
         return []
 
 
-class FlowOracle(Disciplined):
-    """The disciplined bot, told which RFQs are informed. It passes them. It
-    is not told which way they trade, the truth, or any print outcome.
+class PassingOracle(Disciplined):
+    """Diagnostic. The disciplined bot, told which RFQs are informed, which it
+    passes. It is not told which way they trade, the truth, or any outcome.
 
     It keeps every disciplined habit except the one that only stands in for
     what it already knows: the widening in the run-up to a print exists to
@@ -239,6 +247,106 @@ class FlowOracle(Disciplined):
 
     def pre_print_widen(self) -> float:
         return 0.0
+
+
+class FlowOracle(Disciplined):
+    """The benchmark the capture ratio uses. The disciplined bot, told which
+    RFQs are informed -- not about what (print or move), not which way.
+
+    It quotes an informed RFQ ``oracle_informed_widen_bp`` wider, which still
+    trades now and then and, when a dealer takes it, shows the client's side;
+    a one-way ticket shows it at once. Once it knows a side it leans its quote
+    mid that way by ``oracle_lean_bp`` for ``oracle_lean_s``: it buys a
+    little more readily from the crowd when an informed client is buying.
+
+    It reads flow through its quotes only. Its venue trades follow the
+    disciplined rules -- carry into prints, the inventory cap, flat before
+    the close -- and any that would go the way of an active lean is dropped:
+    shading quotes is market making, trading the view through the venue is
+    not. Every lean is logged, so that rule can be audited after the fact.
+    Like the passing oracle it drops the run-up widening, the disciplined
+    bot's stand-in for the knowledge it has.
+    """
+
+    def __init__(self, config: GameConfig, benchmark: BenchmarkConfig, informed: frozenset[int]) -> None:
+        super().__init__(config, benchmark)
+        self.informed = informed
+        self.widen_bp = benchmark.oracle_informed_widen_bp
+        self.lean_bp = benchmark.oracle_lean_bp
+        self.lean_steps = round(benchmark.oracle_lean_s / config.dt)
+        self.direction, self.until = 0, -1
+        self.leans: list[tuple[int, int, int]] = []  # (from step, direction, until step)
+
+    def pre_print_widen(self) -> float:
+        return 0.0
+
+    def _lean(self, side: int, step: int) -> None:
+        self.direction, self.until = side, step + self.lean_steps
+        self.leans.append((step, side, self.until))
+
+    def leaning(self, step: int) -> int:
+        """The direction of the lean active at ``step``: +1, -1 or 0."""
+        return self.direction if step <= self.until else 0
+
+    def observe(self, message):
+        if message["type"] == "event" and message["kind"] == "rfq_resolved":
+            d = message["data"]
+            if d["rfq_ordinal"] in self.informed and d["side"] is not None:
+                self._lean(d["side"], message["step"])
+
+    def answer(self, ticket, state):
+        step = state["step"]
+        if self.skip(ticket, state):
+            return pass_(ticket["ordinal"])
+        informed = ticket["ordinal"] in self.informed
+        if informed and ticket["side"] is not None:
+            self._lean(ticket["side"], step)
+        position = state["book"]["position"]
+        mid = (
+            state["screen"]["mid"]
+            - self.b.disciplined_skew_bp_per_100_lots * position / 100.0
+            + self.lean_bp * self.leaning(step)
+        )
+        width = self.half_width(ticket, state) + (self.widen_bp if informed else 0.0)
+        return _two_way(self.config, ticket["ordinal"], mid, width)
+
+    def _venue(self, actions, state):
+        """Drop any hedge that would trade the way of the active lean."""
+        d = self.leaning(state["step"])
+        return [a for a in actions if not (a["type"] == "hedge" and d and (a["quantity"] > 0) == (d > 0))]
+
+    def after_answer(self, state):
+        return self._venue(super().after_answer(state), state)
+
+    def on_wake(self, state, wake):
+        return self._venue(super().on_wake(state, wake), state)
+
+
+class Trend(Disciplined):
+    """Public only: the disciplined bot with its quote mid moved by ``beta``
+    times the screen's change over the last ``window_s`` seconds. Not a
+    benchmark: it checks that unannounced moves show nothing on the screen a
+    trend-follower could use before the informed flow has done its work."""
+
+    def __init__(self, config: GameConfig, benchmark: BenchmarkConfig, *, window_s: float, beta: float) -> None:
+        super().__init__(config, benchmark)
+        self.window = round(window_s / config.dt)
+        self.beta = beta
+        self.history: list[tuple[int, float]] = []
+
+    def observe(self, message):
+        if message["type"] == "event" and message["kind"] == "screen_update":
+            self.history.append((message["step"], message["data"]["mid"]))
+
+    def answer(self, ticket, state):
+        if self.skip(ticket, state):
+            return pass_(ticket["ordinal"])
+        step = state["step"]
+        then = next((mid for s, mid in reversed(self.history) if s <= step - self.window), None)
+        slope = 0.0 if then is None else state["screen"]["mid"] - then
+        position = state["book"]["position"]
+        mid = state["screen"]["mid"] + self.beta * slope - self.b.disciplined_skew_bp_per_100_lots * position / 100.0
+        return _two_way(self.config, ticket["ordinal"], mid, self.half_width(ticket, state))
 
 
 class ScriptedPlayer(Disciplined):
@@ -309,7 +417,7 @@ class ScriptedPlayer(Disciplined):
 # Running the benchmarks
 # --------------------------------------------------------------------------
 
-BOTS = ("naive", "disciplined", "oracle")
+BOTS = ("naive", "disciplined", "oracle", "passing_oracle")
 
 
 def make_bot(name: str, world: World, benchmark: BenchmarkConfig) -> Strategy:
@@ -319,6 +427,8 @@ def make_bot(name: str, world: World, benchmark: BenchmarkConfig) -> Strategy:
         return Disciplined(world.config, benchmark)
     if name == "oracle":
         return FlowOracle(world.config, benchmark, world.informed_ordinals())
+    if name == "passing_oracle":
+        return PassingOracle(world.config, benchmark, world.informed_ordinals())
     raise ValueError(f"unknown bot {name!r}")
 
 

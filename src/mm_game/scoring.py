@@ -166,34 +166,50 @@ def horizon_keys(config: GameConfig) -> list[str]:
     return [f"{h:g}s" for h in config.markout_horizons_s] + ["event"]
 
 
+# Counterparty types, for splitting fills: who was on the other side.
+FILL_TYPES = ("uninformed", "informed_print", "informed_move")
+
+
+def fill_type(rfq) -> str:
+    """Uninformed, or informed about a print, or about an unannounced move."""
+    if not rfq.informed or rfq.informed_about is None:
+        return "uninformed"
+    return f"informed_{rfq.informed_about.kind}"
+
+
 def decomposition(
-    config: GameConfig, path: FairValuePath, screen_at, trades: Sequence[Trade]
+    config: GameConfig, path: FairValuePath, screen_at, trades: Sequence[Trade], types: dict[int, str]
 ) -> dict[str, Any]:
     """The truth-based P&L decomposition, in dollars, at every horizon.
 
-    Three independently computed terms sum exactly to the session's P&L:
+    One sign convention throughout: every line is a signed contribution to
+    P&L, and the lines add up to the total as printed. Three independently
+    computed lines sum exactly to the session's P&L:
 
-        total = spread captured + inventory P&L - hedge and liquidation costs
+        total = spread captured + inventory + hedging and closing
 
     - spread captured: every client fill's edge against the truth at the
       fill, q * (V_t - p);
-    - inventory P&L: what the truth did to every position held,
-      sum over trades of q * (V_close - V_t);
-    - hedge and liquidation costs: what the venue and the close cost against
-      the truth, split into the venue's charge against the screen and the
-      screen's own error at the moment of the hedge.
+    - inventory: what the truth did to every position held, sum over trades
+      of q * (V_close - V_t);
+    - hedging and closing: what the venue and the close did against the
+      truth -- usually negative -- split into the venue's charge against the
+      screen and the screen's own error at the moment of the hedge.
 
-    Adverse selection is then carved out of inventory, per horizon: the
-    mark-out of each fill over that horizon, sign-flipped so a positive
-    number is money lost to the flow. What remains is inventory P&L beyond
-    the fills' own mark-outs -- what the position did after the information
-    in each fill had played out. So each horizon's line reads
+    Adverse selection is then carved out of inventory, per horizon: each
+    fill's mark-out over that horizon, q * (V_t+h - V_t), which is negative
+    when the flow moved against you. What remains is inventory beyond the
+    fills' own mark-outs -- what the position did after the information in
+    each fill had played out. So each horizon reads
 
-        total = spread - adverse selection + inventory beyond it - costs
+        total = spread captured + adverse selection + inventory beyond + hedging and closing
 
-    and sums to the cent. Fills whose mark-out is truncated by the close, or
-    has no print after it (event-relative), are excluded from adverse
-    selection and counted; their moves stay in inventory, so nothing is lost.
+    and sums to the cent. Adverse selection is also split by who was on the
+    other side (``types``: RFQ ordinal to uninformed / informed_print /
+    informed_move), and those lines sum to it. Fills whose mark-out is
+    truncated by the close, or has no print after it (event-relative), are
+    excluded from adverse selection and counted; their moves stay in
+    inventory, so nothing is lost.
     """
     usd = config.dollars_per_bp_per_lot
     level = config.start_level
@@ -209,30 +225,32 @@ def decomposition(
         if t.source is Source.CLIENT:
             spread += t.quantity * (truth - p)
         else:
-            venue += abs(t.quantity) * t.cost_bp_per_lot
-            screen_error += t.quantity * ((screen_at(t.step) - level) - truth)
-    costs = venue + screen_error
+            venue -= abs(t.quantity) * t.cost_bp_per_lot
+            screen_error += t.quantity * (truth - (screen_at(t.step) - level))
     marks = fill_markouts(config, path, trades)
+    seq_type = {t.seq: types[t.rfq_ordinal] for t in trades if t.source is Source.CLIENT}
     by_horizon = {}
     for key in horizon_keys(config):
-        adverse = 0.0
+        by_type = {k: 0.0 for k in FILL_TYPES}
         excluded = 0
-        for m in marks.values():
+        for seq, m in marks.items():
             cell = m[key]
             if cell["pnl_bp"] is None or cell.get("truncated", False):
                 excluded += 1
                 continue
-            adverse -= cell["pnl_bp"]
+            by_type[seq_type[seq]] += cell["pnl_bp"]
+        adverse = sum(by_type.values())
         by_horizon[key] = {
             "adverse_selection_usd": adverse * usd,
-            "inventory_beyond_usd": (inventory + adverse) * usd,
+            "adverse_selection_by_type_usd": {k: x * usd for k, x in by_type.items()},
+            "inventory_beyond_usd": (inventory - adverse) * usd,
             "fills_excluded": excluded,
         }
     return {
         "total_usd": cash * usd,
         "spread_captured_usd": spread * usd,
         "inventory_usd": inventory * usd,
-        "hedge_and_close_costs_usd": costs * usd,
+        "hedging_and_closing_usd": (venue + screen_error) * usd,
         "venue_charge_usd": venue * usd,
         "screen_error_on_hedges_usd": screen_error * usd,
         "by_horizon": by_horizon,
@@ -310,9 +328,24 @@ def _excursion(points: list[tuple[int, float]], dt: float) -> dict[str, Any] | N
     return best
 
 
+def _reaction(mids: dict[int, float], mid_steps: list[int], at: int, size_bp: float, dt: float):
+    """When the quote mid first moved at least half of ``size_bp`` its way,
+    measured from the last two-sided quote before step ``at``. None if no
+    quote before, or if quotes never got there."""
+    before = [s for s in mid_steps if s < at]
+    if not before:
+        return None
+    m0 = mids[before[-1]]
+    for s in (s for s in mid_steps if s >= at):
+        if (mids[s] - m0) * math.copysign(1.0, size_bp) >= abs(size_bp) / 2:
+            return {"steps": s - at, "seconds": (s - at) * dt}
+    return None
+
+
 def diagnostics(world, events, trades: Sequence[Trade]) -> dict[str, Any]:
     """The derived diagnostics that turn a log into a review conversation.
-    Reads the truth: post-session only."""
+    Reads the truth: post-session only. Every money figure is a signed P&L
+    contribution."""
     config = world.config
     path = world.path
     view = path.public
@@ -343,16 +376,16 @@ def diagnostics(world, events, trades: Sequence[Trade]) -> dict[str, Any]:
             how_far_off.append(sign * (mine - res["cover"]))
     quoted = sum(v for k, v in outcomes.items() if k != "passed")
 
-    # Mark-outs and volume, informed against uninformed.
+    # Mark-outs and volume by who was on the other side.
     marks = fill_markouts(config, path, trades)
     buckets: dict[str, dict[str, Any]] = {
-        b: {"fills": 0, "lots": 0, "spread_captured_usd": 0.0, "markouts": {}} for b in ("informed", "uninformed")
+        b: {"fills": 0, "lots": 0, "spread_captured_usd": 0.0, "markouts": {}} for b in FILL_TYPES
     }
     for t in trades:
         if t.source is not Source.CLIENT:
             continue
         rfq = rfqs[t.rfq_ordinal]
-        b = buckets["informed" if rfq.informed else "uninformed"]
+        b = buckets[fill_type(rfq)]
         b["fills"] += 1
         b["lots"] += abs(t.quantity)
         b["spread_captured_usd"] += t.quantity * (path.values[t.step] - t.price) * usd
@@ -367,7 +400,8 @@ def diagnostics(world, events, trades: Sequence[Trade]) -> dict[str, Any]:
     for b in buckets.values():
         for m in b["markouts"].values():
             m["per_lot_bp"] = m["pnl_usd"] / usd / m["lots"] if m["lots"] else None
-    total_lots = buckets["informed"]["lots"] + buckets["uninformed"]["lots"]
+    total_lots = sum(b["lots"] for b in buckets.values())
+    informed_lots = buckets["informed_print"]["lots"] + buckets["informed_move"]["lots"]
 
     # Quote mid against the truth and against the screen.
     vs_truth, vs_screen = [], []
@@ -401,15 +435,8 @@ def diagnostics(world, events, trades: Sequence[Trade]) -> dict[str, Any]:
     for i, e in enumerate(int(x) for x in path.event_steps):
         window = next((w for w in path.drift_windows if w.event_index == i), None)
         jump = float(path.jump_sizes[i])
-        before = [s for s in mid_steps if s < e]
         after = [s for s in mid_steps if s >= e]
-        reaction = None
-        if before:
-            m0 = mids[before[-1]]
-            for s in (s for s in mid_steps if s >= e):
-                if (mids[s] - m0) * math.copysign(1.0, jump) >= abs(jump) / 2:
-                    reaction = {"steps": s - e, "seconds": (s - e) * dt}
-                    break
+        reaction = _reaction(mids, mid_steps, e, jump, dt)
         prints.append(
             {
                 "print_index": i,
@@ -424,27 +451,98 @@ def diagnostics(world, events, trades: Sequence[Trade]) -> dict[str, Any]:
             }
         )
 
-    # Clients.
+    # Unannounced moves, revealed: when, how big, how much warning; where the
+    # position was; the informed inquiries that foretold each and what was
+    # done with them; when the quotes caught up.
+    fills_by_rfq = {t.rfq_ordinal: t for t in trades if t.source is Source.CLIENT}
+    moves = []
+    for m in path.move_list:
+        foretold = []
+        for q in rfqs:
+            if q.informed_about is not None and q.informed_about.kind == "move" and q.informed_about.index == m.index:
+                row = table.get(q.ordinal)
+                res = None if row is None else row.get("resolved")
+                fill = fills_by_rfq.get(q.ordinal)
+                foretold.append(
+                    {
+                        "rfq_ordinal": q.ordinal,
+                        "step": q.step,
+                        "client_id": q.client_id,
+                        "size": q.size,
+                        "client_side": int(q.side),
+                        "shown": row is not None,
+                        "outcome": None if res is None else res["outcome"],
+                        "your_quantity": 0 if fill is None else fill.quantity,
+                    }
+                )
+        moves.append(
+            {
+                "move_index": m.index,
+                "inform_step": m.inform_step,
+                "start_step": m.start_step,
+                "end_step": m.end_step,
+                "size_bp": m.total_bp,
+                "duration_s": (m.end_step - m.start_step) * dt,
+                "lead_s": (m.start_step - m.inform_step) * dt,
+                "position_at_inform": int(held[m.inform_step]),
+                "position_at_start": int(held[m.start_step]),
+                "position_at_end": int(held[min(m.end_step, len(held) - 1)]),
+                "informed_rfqs": foretold,
+                "quotes_reflected_move_after": _reaction(mids, mid_steps, m.start_step, m.total_bp, dt),
+            }
+        )
+
+    # Clients: what each did with you, and -- revealed -- what they knew.
     clients = {}
     for c in world.schedule.clients:
         clients[c.client_id] = {
             "category": c.category.value,
             "informed_type": c.informed_type,
             "rfqs": 0,
-            "trades": 0,
+            "quoted": 0,
+            "won": 0,
             "lots": 0,
-            "pnl_300s_usd": 0.0,
+            "net_lots": 0,
+            "markouts_usd": {k: 0.0 for k in ("60s", "300s", "event")},
+            "markouts_excluded": {k: 0 for k in ("60s", "300s", "event")},
+            "informed_about": [],
         }
     for ordinal, row in table.items():
-        clients[row["rfq"]["client_id"]]["rfqs"] += 1
+        c = clients[row["rfq"]["client_id"]]
+        c["rfqs"] += 1
+        res = row.get("resolved")
+        if res is not None and res["outcome"] != "passed":
+            c["quoted"] += 1
     for t in trades:
         if t.source is Source.CLIENT:
             c = clients[rfqs[t.rfq_ordinal].client_id]
-            c["trades"] += 1
+            c["won"] += 1
             c["lots"] += abs(t.quantity)
-            cell = marks[t.seq].get("300s")
-            if cell is not None and not cell["truncated"]:
-                c["pnl_300s_usd"] += cell["pnl_bp"] * usd
+            c["net_lots"] += t.quantity
+            for key in c["markouts_usd"]:
+                cell = marks[t.seq].get(key)
+                if cell is None:
+                    continue
+                if cell["pnl_bp"] is None or cell.get("truncated", False):
+                    c["markouts_excluded"][key] += 1
+                else:
+                    c["markouts_usd"][key] += cell["pnl_bp"] * usd
+    seen_views = set()
+    for q in rfqs:
+        if q.informed_about is None or (q.client_id, q.informed_about.kind, q.informed_about.index) in seen_views:
+            continue
+        seen_views.add((q.client_id, q.informed_about.kind, q.informed_about.index))
+        about = q.informed_about
+        truth = float(path.jump_sizes[about.index]) if about.kind == "print" else path.move_list[about.index].total_bp
+        clients[q.client_id]["informed_about"].append(
+            {
+                "kind": about.kind,
+                "index": about.index,
+                "signal_direction": int(math.copysign(1, q.signal_bp)),
+                "actual_direction": int(math.copysign(1, truth)),
+                "right": (q.signal_bp > 0) == (truth > 0),
+            }
+        )
 
     return {
         "outcomes": outcomes,
@@ -458,7 +556,7 @@ def diagnostics(world, events, trades: Sequence[Trade]) -> dict[str, Any]:
         },
         "flow": {
             **buckets,
-            "informed_share_of_volume": buckets["informed"]["lots"] / total_lots if total_lots else None,
+            "informed_share_of_volume": informed_lots / total_lots if total_lots else None,
         },
         "quote_vs_truth": tracking(vs_truth),
         "quote_vs_screen": tracking(vs_screen),
@@ -466,6 +564,7 @@ def diagnostics(world, events, trades: Sequence[Trade]) -> dict[str, Any]:
             "max_abs": int(np.abs(held).max()) if held.size else 0,
             "time_weighted_mean_abs": float(np.abs(held).mean()) if held.size else 0.0,
             "into_prints": prints,
+            "moves": moves,
         },
         "clients": {str(k): v for k, v in clients.items()},
     }

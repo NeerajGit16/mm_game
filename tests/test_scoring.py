@@ -20,6 +20,14 @@ SCORING = ScoringConfig()
 BENCH = BenchmarkConfig()
 
 
+def types_of(w) -> dict[int, str]:
+    return {q.ordinal: scoring.fill_type(q) for q in w.schedule.rfqs}
+
+
+def decompose(cfg, w, trades):
+    return scoring.decomposition(cfg, w.path, w.path.public.screen_at, trades, types_of(w))
+
+
 def played(cfg: GameConfig, seed: int, bot: str = "naive", quit_at: int | None = None):
     w = world.generate(cfg, seed)
     s = Session(w.public, w.resolve, settings=Settings(), scoring=SCORING)
@@ -36,6 +44,7 @@ SESSIONS = [
     (GameConfig.for_session(30), 1, "naive", None),
     (GameConfig.for_session(60), 2, "disciplined", None),
     (GameConfig(), 3, "oracle", None),
+    (GameConfig(), 6, "passing_oracle", None),
     (GameConfig(), 4, "scripted", None),
     (GameConfig.for_session(60), 5, "scripted", 15000),
 ]
@@ -48,32 +57,58 @@ SESSIONS = [
 
 @pytest.mark.parametrize("cfg,seed,bot,quit_at", SESSIONS)
 def test_decomposition_sums_to_the_cent(cfg, seed, bot, quit_at):
-    """Spread captured + inventory P&L - hedge and closing costs equals the
-    session's P&L to the cent, with every term computed independently, and
-    at every mark-out horizon spread - adverse selection + inventory beyond
-    the mark-outs - costs equals it too. Catches a trade left out of one
-    term, a sign slip, a cost booked against the screen in one place and the
-    truth in another -- each moves the total by real money while every line
-    still looks plausible. Inventory is cross-checked against the position
-    path integrated over the truth's moves, a different route to the same
-    number."""
+    """One sign convention: every line is a signed P&L contribution and the
+    lines add up. Spread captured + inventory + hedging and closing equals
+    the session's P&L to the cent, every term computed independently; at
+    every mark-out horizon spread + adverse selection + inventory beyond the
+    mark-outs + hedging and closing equals it too. Catches a trade left out
+    of one term, a sign slip, a cost booked against the screen in one place
+    and the truth in another -- each moves the total by real money while
+    every line still looks plausible. Inventory is cross-checked against the
+    position path integrated over the truth's moves, a different route to
+    the same number."""
     w, s = played(cfg, seed, bot, quit_at)
-    dec = scoring.decomposition(cfg, w.path, w.path.public.screen_at, s.book.trades)
+    dec = decompose(cfg, w, s.book.trades)
     pnl = s.log.of(Kind.SESSION_END)[0].data["pnl_usd"]
     cent = 0.005
     assert dec["total_usd"] == pytest.approx(pnl, abs=cent)
-    assert dec["spread_captured_usd"] + dec["inventory_usd"] - dec["hedge_and_close_costs_usd"] == pytest.approx(
+    assert dec["spread_captured_usd"] + dec["inventory_usd"] + dec["hedging_and_closing_usd"] == pytest.approx(
         pnl, abs=cent
     )
     for key, h in dec["by_horizon"].items():
-        line = dec["spread_captured_usd"] - h["adverse_selection_usd"] + h["inventory_beyond_usd"] - dec["hedge_and_close_costs_usd"]
+        line = (
+            dec["spread_captured_usd"] + h["adverse_selection_usd"] + h["inventory_beyond_usd"]
+            + dec["hedging_and_closing_usd"]
+        )
         assert line == pytest.approx(pnl, abs=cent), key
     held = scoring.position_path(s.book.trades, cfg.n_steps)
     integrated = float(np.sum(held * np.diff(w.path.relative))) * cfg.dollars_per_bp_per_lot
     assert integrated == pytest.approx(dec["inventory_usd"], abs=cent)
     assert dec["venue_charge_usd"] + dec["screen_error_on_hedges_usd"] == pytest.approx(
-        dec["hedge_and_close_costs_usd"], abs=cent
+        dec["hedging_and_closing_usd"], abs=cent
     )
+    if any(t.source is not Source.CLIENT for t in s.book.trades):
+        assert dec["venue_charge_usd"] < 0  # a charge is a negative contribution, never a positive "cost"
+
+
+@pytest.mark.parametrize("cfg,seed,bot,quit_at", SESSIONS)
+def test_adverse_selection_by_type_adds_up_to_the_line_at_every_horizon(cfg, seed, bot, quit_at):
+    """The per-type adverse-selection lines -- uninformed, informed about a
+    print, informed about a move -- sum to the decomposition's adverse
+    selection at every horizon, and the diagnostics' per-type mark-outs are
+    the same numbers. A fill counted under two types, dropped from all, or
+    excluded in one place and not the other would make the split disagree
+    with the line it explains, while each figure still looked plausible."""
+    w, s = played(cfg, seed, bot, quit_at)
+    dec = decompose(cfg, w, s.book.trades)
+    diag = scoring.diagnostics(w, s.log, s.book.trades)
+    for key, h in dec["by_horizon"].items():
+        parts = h["adverse_selection_by_type_usd"]
+        assert set(parts) == set(scoring.FILL_TYPES)
+        assert sum(parts.values()) == pytest.approx(h["adverse_selection_usd"], abs=0.005), key
+        for t in scoring.FILL_TYPES:
+            bucket = diag["flow"][t]["markouts"].get(key)
+            assert (bucket["pnl_usd"] if bucket else 0.0) == pytest.approx(parts[t], abs=0.005), (key, t)
 
 
 def test_spread_captured_is_edge_against_the_truth_at_the_fill():
@@ -86,7 +121,7 @@ def test_spread_captured_is_edge_against_the_truth_at_the_fill():
     expected = sum(
         t.quantity * (w.path.values[t.step] - t.price) for t in s.book.trades if t.source is Source.CLIENT
     ) * cfg.dollars_per_bp_per_lot
-    dec = scoring.decomposition(cfg, w.path, w.path.public.screen_at, s.book.trades)
+    dec = decompose(cfg, w, s.book.trades)
     assert dec["spread_captured_usd"] == pytest.approx(expected, abs=1e-6)
     assert any(t.source is Source.HEDGE for t in s.book.trades)
 
@@ -118,11 +153,11 @@ def test_truncated_and_undefined_markouts_are_flagged_and_excluded():
     assert marks[1]["10s"]["truncated"] is False
     assert marks[0]["event"]["pnl_bp"] is not None
     assert marks[1]["event"]["pnl_bp"] is None and marks[2]["event"]["pnl_bp"] is None
-    dec = scoring.decomposition(cfg, w.path, w.path.public.screen_at, trades)
+    dec = scoring.decomposition(cfg, w.path, w.path.public.screen_at, trades, {0: "uninformed", 1: "uninformed", 2: "uninformed"})
     assert dec["by_horizon"]["300s"]["fills_excluded"] == 1
     assert dec["by_horizon"]["10s"]["fills_excluded"] == 0
     assert dec["by_horizon"]["event"]["fills_excluded"] == 2
-    expected_300 = -marks[0]["300s"]["pnl_bp"] - marks[2]["300s"]["pnl_bp"]
+    expected_300 = marks[0]["300s"]["pnl_bp"] + marks[2]["300s"]["pnl_bp"]
     assert dec["by_horizon"]["300s"]["adverse_selection_usd"] == pytest.approx(expected_300 * cfg.dollars_per_bp_per_lot)
 
 

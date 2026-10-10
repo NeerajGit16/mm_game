@@ -69,6 +69,11 @@ def test_defaults_match_the_instrument_spec():
     assert (cfg.competitor_print_widen, cfg.competitor_print_window_s) == (1.0, 120.0)
     assert (cfg.competitor_screen_weight, cfg.competitor_error_bp, cfg.competitor_error_corr_s) == (0.75, 0.15, 120.0)
     assert (cfg.competitor_participation_prob, cfg.informed_participation_multiplier) == (0.6, 1.0)
+    assert cfg.move_rate_per_free_hour == 2.0
+    assert (cfg.move_magnitude_min_bp, cfg.move_magnitude_max_bp) == (2.0, 3.5)
+    assert (cfg.move_duration_min_s, cfg.move_duration_max_s) == (30.0, 60.0)
+    assert (cfg.move_lead_min_s, cfg.move_lead_max_s) == (120.0, 300.0)
+    assert (cfg.move_edge_margin_s, cfg.move_print_clearance_s, cfg.move_min_gap_s) == (300.0, 300.0, 300.0)
     assert (cfg.client_tolerance_bp, cfg.client_tolerance_log_sd, cfg.client_tolerance_size_growth) == (0.75, 0.4, 0.5)
     assert cfg.informed_edge_given_up == 0.5
     assert (cfg.hedge_cost_bp, cfg.hedge_impact_bp, cfg.hedge_margin_bp) == (1.0, 0.5, 0.25)
@@ -336,6 +341,14 @@ def test_round_trips_through_json_exactly():
         ("competitor_error_bp", -0.1),
         ("competitor_error_corr_s", float("nan")),
         ("competitor_participation_prob", 1.1),
+        ("move_rate_per_free_hour", -1.0),
+        ("move_rate_per_free_hour", float("nan")),
+        ("move_magnitude_min_bp", 4.0),  # above the default max
+        ("move_duration_min_s", 0.0),
+        ("move_duration_max_s", 10.0),  # below the default min
+        ("move_lead_min_s", -1.0),
+        ("move_min_gap_s", -1.0),
+        ("move_print_clearance_s", float("inf")),
         ("competitor_participation_prob", float("nan")),
         ("informed_participation_multiplier", -0.5),
         ("informed_participation_multiplier", float("inf")),

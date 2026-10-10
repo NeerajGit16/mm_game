@@ -35,11 +35,17 @@ def test_bots_are_given_public_information_only():
     and every capture ratio after that would be measured against a cheat."""
     for cls in (agents.Naive, agents.Disciplined):
         assert list(inspect.signature(cls.__init__).parameters) == ["self", "config", "benchmark"]
-    assert list(inspect.signature(agents.FlowOracle.__init__).parameters) == ["self", "config", "benchmark", "informed"]
+    for cls in (agents.FlowOracle, agents.PassingOracle):
+        assert list(inspect.signature(cls.__init__).parameters) == ["self", "config", "benchmark", "informed"]
+    assert list(inspect.signature(agents.Trend.__init__).parameters) == ["self", "config", "benchmark", "window_s", "beta"]
     w = world.generate(GameConfig(), 3)
-    oracle = agents.make_bot("oracle", w, BENCH)
-    assert oracle.informed == w.informed_ordinals() and isinstance(oracle.informed, frozenset)
-    assert all(isinstance(i, int) for i in oracle.informed)
+    for name in ("oracle", "passing_oracle"):
+        oracle = agents.make_bot(name, w, BENCH)
+        assert oracle.informed == w.informed_ordinals() and isinstance(oracle.informed, frozenset)
+        assert all(isinstance(i, int) for i in oracle.informed)
+    # Informed about moves as well as prints, and told nothing about which.
+    kinds = {q.informed_about.kind for q in w.schedule.rfqs if q.informed}
+    assert w.informed_ordinals() == frozenset(q.ordinal for q in w.schedule.rfqs if q.informed) and kinds
 
 
 def test_naive_never_hedges_and_quotes_a_fixed_width():
@@ -50,14 +56,14 @@ def test_naive_never_hedges_and_quotes_a_fixed_width():
     assert widths == {2 * BENCH.naive_half_width_bp}
 
 
-def test_oracle_passes_exactly_the_informed_rfqs_and_otherwise_quotes_like_the_disciplined_bot():
-    """The oracle declines every informed RFQ it is shown and no other until
-    the closing lead; on an RFQ outside any run-up to a print, with the same
-    position, it quotes exactly what the disciplined bot quotes. An oracle
-    that also knew the truth or the print would show up as quotes the
-    disciplined bot never makes."""
+def test_passing_oracle_passes_exactly_the_informed_rfqs_and_otherwise_quotes_like_the_disciplined_bot():
+    """The passing oracle (a diagnostic) declines every informed RFQ it is
+    shown and no other until the closing lead; on an RFQ outside any run-up
+    to a print, with the same position, it quotes exactly what the
+    disciplined bot quotes. An oracle that also knew the truth or the print
+    would show up as quotes the disciplined bot never makes."""
     w = world.generate(GameConfig(), 6)
-    s = run("oracle", w)
+    s = run("passing_oracle", w)
     close_lead = w.config.n_steps - round(BENCH.disciplined_close_lead_s / w.config.dt)
     informed = w.informed_ordinals()
     assert informed
@@ -66,12 +72,95 @@ def test_oracle_passes_exactly_the_informed_rfqs_and_otherwise_quotes_like_the_d
         passed = e.data["bid"] is None and e.data["ask"] is None
         assert passed == (o in informed or e.step >= close_lead)
     d = agents.Disciplined(w.config, BENCH)
-    o = agents.FlowOracle(w.config, BENCH, informed)
+    o = agents.PassingOracle(w.config, BENCH, informed)
     for x in (d, o):
         x.on_start({"config": w.config.to_record(), "print_steps": [10_000]}, {})
     ticket = {"ordinal": 999, "size": 30, "in_comp": 2}
     state = {"step": 100, "screen": {"mid": 9550.0}, "book": {"position": 40}}
     assert o.answer(ticket, state) == d.answer(ticket, state)
+
+
+def test_flow_oracle_quotes_informed_wide_and_leans_with_what_it_learns():
+    """The flow oracle quotes every informed RFQ (it does not pass them),
+    wider than the disciplined bot by the configured amount; with no lean
+    active and no informed RFQ it quotes exactly what the disciplined bot
+    does outside a run-up; once a client's side is known it leans its mid
+    that way for the configured time and then stops. An oracle that knew
+    which way an RFQ was going before the outcome showed it would lean
+    without a logged reason."""
+    cfg = GameConfig()
+    w = world.generate(cfg, 6)
+    informed = w.informed_ordinals()
+    s = run("oracle", w)
+    close_lead = cfg.n_steps - round(BENCH.disciplined_close_lead_s / cfg.dt)
+    quoted_informed = [
+        e for e in s.log.of(Kind.QUOTE_SENT) if e.data["rfq_ordinal"] in informed and e.step < close_lead
+    ]
+    assert quoted_informed and all(e.data["bid"] is not None or e.data["ask"] is not None for e in quoted_informed)
+
+    o = agents.FlowOracle(cfg, BENCH, frozenset({7}))
+    d = agents.Disciplined(cfg, BENCH)
+    for x in (o, d):
+        x.on_start({"config": cfg.to_record(), "print_steps": [60_000]}, {})
+    state = {"step": 100, "screen": {"mid": 9550.0}, "book": {"position": 0}}
+    plain = {"ordinal": 3, "size": 20, "in_comp": 2, "side": None}
+    assert o.answer(plain, state) == d.answer(plain, state)
+    wide = o.answer({**plain, "ordinal": 7}, state)
+    base = d.answer({**plain, "ordinal": 7}, state)
+    assert wide["ask"] - wide["bid"] == pytest.approx(base["ask"] - base["bid"] + 2 * BENCH.oracle_informed_widen_bp)
+    # The outcome shows the client bought: lean up for oracle_lean_s.
+    o.observe({"type": "event", "kind": "rfq_resolved", "step": 100, "data": {"rfq_ordinal": 7, "side": 1}})
+    later = {**state, "step": 100 + round(BENCH.oracle_lean_s / cfg.dt) - 1}
+    leaned = o.answer(plain, later)
+    assert leaned["bid"] == pytest.approx(d.answer(plain, later)["bid"] + BENCH.oracle_lean_bp)
+    expired = {**state, "step": 100 + round(BENCH.oracle_lean_s / cfg.dt) + 1}
+    assert o.answer(plain, expired) == d.answer(plain, expired)
+    assert o.leans == [(100, 1, 100 + round(BENCH.oracle_lean_s / cfg.dt))]
+
+
+@pytest.mark.parametrize("seed", range(12))
+def test_flow_oracle_never_trades_on_the_venue_the_way_of_an_active_lean(seed):
+    """Audited from the oracle's own logged leans: no hedge it sends goes
+    the direction of a lean active at that step. Its venue trades follow
+    the disciplined rules only -- shading quotes is market making, trading
+    the view through the venue is not -- so a hedge riding the informed
+    client's direction would be the benchmark trading information. The next
+    test checks the audit had something to audit."""
+    cfg = GameConfig()
+    w = world.generate(cfg, seed)
+    session = agents.Session(w.public, w.resolve, settings=Settings(), scoring=SCORING)
+    bot = agents.FlowOracle(cfg, BENCH, w.informed_ordinals())
+    agents.play(session, bot)
+
+    def active(step):
+        lean = 0
+        for start, direction, until in bot.leans:
+            if start <= step:
+                lean = direction if step <= until else 0
+        return lean
+
+    for e in session.log.of(Kind.HEDGE_EXECUTED):
+        d = active(e.step)
+        if d:
+            assert (e.data["requested"] > 0) != (d > 0), (e.step, e.data, d)
+
+
+def test_the_lean_audit_was_exercised():
+    """Across the audited sessions some hedges fell inside an active lean,
+    so the rule was tested rather than passed vacuously."""
+    total = 0
+    cfg = GameConfig()
+    for seed in range(12):
+        w = world.generate(cfg, seed)
+        session = agents.Session(w.public, w.resolve, settings=Settings(), scoring=SCORING)
+        bot = agents.FlowOracle(cfg, BENCH, w.informed_ordinals())
+        agents.play(session, bot)
+        for e in session.log.of(Kind.HEDGE_EXECUTED):
+            for start, direction, until in bot.leans:
+                if start <= e.step <= until:
+                    total += 1
+                    break
+    assert total > 0
 
 
 def test_disciplined_hedges_toward_the_carry_before_prints_and_flattens_before_the_close():

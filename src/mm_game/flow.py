@@ -67,7 +67,7 @@ from enum import IntEnum, StrEnum
 import numpy as np
 
 from mm_game.config import GameConfig
-from mm_game.fair_value import MARKET_ORDINAL, DriftWindow, FairValuePath
+from mm_game.fair_value import MARKET_ORDINAL, DriftWindow, FairValuePath, Move
 from mm_game.rng import RngStreams, Stream
 
 
@@ -89,6 +89,18 @@ class Category(StrEnum):
 # --------------------------------------------------------------------------
 # Result types
 # --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class InformedAbout:
+    """What an informed inquiry knows about: a print or an unannounced
+    move, by its index. Hidden."""
+
+    kind: str  # "print" or "move"
+    index: int
+
+    def to_record(self) -> dict[str, object]:
+        return {"kind": self.kind, "index": self.index}
 
 
 @dataclass(frozen=True)
@@ -134,8 +146,8 @@ class RFQ:
     one_way: bool
     side: Side  # public only if one_way
     informed: bool  # hidden
-    signal_bp: float | None  # hidden: the noisy print estimate, signed
-    event_index: int | None  # hidden: the print they are informed about
+    signal_bp: float | None  # hidden: the noisy estimate of the print or move, signed
+    informed_about: InformedAbout | None  # hidden: which print or move
     base_size: float  # hidden: the lognormal draw before scaling and rounding
     dealers_in_comp: tuple[bool, ...]  # hidden: which dealers were asked
 
@@ -214,7 +226,7 @@ class FlowSchedule:
                     "side": int(q.side),
                     "informed": q.informed,
                     "signal_bp": q.signal_bp,
-                    "event_index": q.event_index,
+                    "informed_about": None if q.informed_about is None else q.informed_about.to_record(),
                     "base_size": q.base_size,
                     "dealers_in_comp": list(q.dealers_in_comp),
                 }
@@ -288,6 +300,13 @@ def _informing_window(windows: tuple[DriftWindow, ...], step: int) -> DriftWindo
     """
     covering = [w for w in windows if w.start_step <= step < w.end_step]
     return min(covering, key=lambda w: w.end_step) if covering else None
+
+
+def _informing_move(moves: tuple[Move, ...], step: int) -> Move | None:
+    """The move an informed client at ``step`` knows about: one whose
+    informing window [inform_step, end_step) covers it. Kept moves never
+    overlap each other or a print's run-up, so there is at most one."""
+    return next((m for m in moves if m.inform_step <= step < m.end_step), None)
 
 
 def _assign_client(clients: tuple[Client, ...], in_window: bool, multiplier: float, u: float) -> Client:
@@ -375,19 +394,21 @@ def generate(config: GameConfig, rng: RngStreams, path: FairValuePath) -> FlowSc
 
     clients = _draw_roster(config, rng)
     steps = _draw_arrivals(config, rng)
-    # The drift rate at each step, for the crowd's tilt: the net of any
-    # overlapping windows, which is what the screen shows drifting.
-    drift_rate = np.diff(path.drift)
+    # The trend rate at each step, for the crowd's tilt: pre-print drift plus
+    # any unannounced move's ramp -- what the screen shows trending. A move's
+    # lead is not in it: the crowd follows the screen, not the informed.
+    drift_rate = np.diff(path.drift + path.moves)
     # Each informed client's view of each print, drawn on first use. The draw
     # is keyed on the pair, so caching changes nothing but speed.
-    views: dict[tuple[int, int], float] = {}
+    views: dict[tuple[str, int, int], float] = {}
 
     rfqs = []
     for ordinal, step in enumerate(int(s) for s in steps):
         window = _informing_window(path.drift_windows, step)
+        move = None if window is not None else _informing_move(path.move_list, step)
         client = _assign_client(
             clients,
-            in_window=window is not None,
+            in_window=window is not None or move is not None,
             multiplier=config.informed_activity_multiplier,
             u=rng.substream(Stream.FLOW_CLIENT, ordinal).random(),
         )
@@ -400,20 +421,25 @@ def generate(config: GameConfig, rng: RngStreams, path: FairValuePath) -> FlowSc
         direction = rng.substream(Stream.FLOW_DIRECTION, ordinal)
         u_side, u_one_way = direction.random(), direction.random()
 
-        informed = window is not None and client.informed_type
-        if window is not None and client.informed_type:
-            pair = (client.client_id, window.event_index)
-            if pair not in views:
-                views[pair] = _draw_signal(
-                    config,
-                    rng.substream(Stream.FLOW_INFORMED, _pair_key(*pair)),
-                    float(path.jump_sizes[window.event_index]),
-                )
-            signal = views[pair]
+        informed = (window is not None or move is not None) and client.informed_type
+        if informed:
+            # A print view and a move view come from different streams, so
+            # the same (client, n) pair never shares draws across the two.
+            if window is not None:
+                about = InformedAbout("print", window.event_index)
+                key = ("print", client.client_id, window.event_index)
+                stream, n, truth = Stream.FLOW_INFORMED, window.event_index, float(path.jump_sizes[window.event_index])
+            else:
+                about = InformedAbout("move", move.index)
+                key = ("move", client.client_id, move.candidate)
+                stream, n, truth = Stream.FLOW_INFORMED_MOVE, move.candidate, move.total_bp
+            if key not in views:
+                views[key] = _draw_signal(config, rng.substream(stream, _pair_key(client.client_id, n)), truth)
+            signal = views[key]
             side = Side.BUY if signal > 0 else Side.SELL
             size = _lots(config, base * _size_factor(config, signal))
             one_way = u_one_way < config.one_way_prob_informed
-            event_index: int | None = window.event_index
+            informed_about: InformedAbout | None = about
         else:
             signal = None
             rate = drift_rate[step]
@@ -426,7 +452,7 @@ def generate(config: GameConfig, rng: RngStreams, path: FairValuePath) -> FlowSc
             side = Side.BUY if u_side < p_buy else Side.SELL
             size = _lots(config, base)
             one_way = u_one_way < config.one_way_prob_uninformed
-            event_index = None
+            informed_about = None
 
         rfqs.append(
             RFQ(
@@ -438,7 +464,7 @@ def generate(config: GameConfig, rng: RngStreams, path: FairValuePath) -> FlowSc
                 side=side,
                 informed=informed,
                 signal_bp=signal,
-                event_index=event_index,
+                informed_about=informed_about,
                 base_size=base,
                 dealers_in_comp=_dealers_in_comp(
                     config, rng.substream(Stream.FLOW_PARTICIPATION, ordinal), informed

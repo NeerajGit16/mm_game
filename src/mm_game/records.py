@@ -304,7 +304,7 @@ def rfq_layers(world: World, session: Session) -> list[dict[str, Any]]:
                     "side": int(rfq.side),
                     "informed": rfq.informed,
                     "signal_bp": rfq.signal_bp,
-                    "print_index": rfq.event_index,
+                    "informed_about": None if rfq.informed_about is None else rfq.informed_about.to_record(),
                     "client_informed_type": world.schedule.clients[rfq.client_id].informed_type,
                     "market": _market_side(world, rfq.ordinal),
                     "markouts": None if t is None else marks[t.seq],
@@ -340,9 +340,10 @@ def hidden_layer(world: World, session: Session) -> dict[str, Any]:
 def analyse(world: World, session: Session, scoring: ScoringConfig) -> dict[str, Any]:
     """Scores, decomposition and diagnostics for one finished session."""
     trades = session.book.trades
+    types = {q.ordinal: sc.fill_type(q) for q in world.schedule.rfqs}
     return {
         "scores": scores(world, session, scoring),
-        "decomposition": sc.decomposition(world.config, world.path, world.path.public.screen_at, trades),
+        "decomposition": sc.decomposition(world.config, world.path, world.path.public.screen_at, trades, types),
         "diagnostics": sc.diagnostics(world, session.log, trades),
     }
 
@@ -356,10 +357,8 @@ def bot_result(world: World, session: Session, scoring: ScoringConfig) -> dict[s
         "summary": {
             "hit_rate": d["hit_rate"],
             "outcomes": d["outcomes"],
-            "informed_fills": d["flow"]["informed"]["fills"],
-            "informed_lots": d["flow"]["informed"]["lots"],
-            "uninformed_fills": d["flow"]["uninformed"]["fills"],
-            "uninformed_lots": d["flow"]["uninformed"]["lots"],
+            "fills_by_type": {k: v["fills"] for k, v in d["flow"].items() if isinstance(v, dict)},
+            "lots_by_type": {k: v["lots"] for k, v in d["flow"].items() if isinstance(v, dict)},
             "max_abs_position": d["position"]["max_abs"],
             "time_weighted_mean_abs_position": d["position"]["time_weighted_mean_abs"],
         },
@@ -425,103 +424,167 @@ def coaching_record(
 
 
 def _usd(x: float | None) -> str:
-    return "n/a" if x is None else f"${x:,.0f}"
+    if x is None:
+        return "n/a"
+    return f"-${-x:,.0f}" if x < -0.5 else f"${x:,.0f}"
+
+
+def _signed(x: float | None) -> str:
+    """A P&L contribution: always signed, so the column adds up as read."""
+    if x is None:
+        return "n/a"
+    return f"−${-x:,.0f}" if x < -0.5 else f"+${x:,.0f}"
 
 
 def _ratio(x: float | None) -> str:
     return "n/a" if x is None else f"{x:.2f}"
 
 
+def _minutes(step: int, dt: float) -> str:
+    return f"{step * dt / 60:.1f} min"
+
+
+TYPE_LABEL = {
+    "uninformed": "uninformed",
+    "informed_print": "informed about a print",
+    "informed_move": "informed about a move",
+}
+BOT_LABEL = (
+    ("naive", "Naive"),
+    ("disciplined", "Disciplined"),
+    ("oracle", "Flow oracle"),
+    ("passing_oracle", "Passing oracle*"),
+)
+
+
 def markdown_summary(record: dict[str, Any]) -> str:
     h, s, dec, d = record["header"], record["scores"], record["decomposition"], record["diagnostics"]
     bots = record["benchmarks"]
     cfg = h["config"]
+    dt = cfg["dt"]
     minutes = cfg["session_length"] / 60
     preset = record["settings"]["preset"]
     flags = record["flags"]
-    horizon = f"{record['scoring_config']['decomposition_horizon_s']:g}s"
-    lines = [
-        f"# Session summary — {minutes:g} minutes{' (preset)' if preset else ''}, seed {h['seed']}",
-        "",
-    ]
+    horizons = list(dec["by_horizon"])
+    lines = [f"# Session summary — {minutes:g} minutes{' (preset)' if preset else ''}, seed {h['seed']}", ""]
     if flags["replay_of_played_seed"]:
         lines += ["**Replay of a seed already played** — excluded from the track record.", ""]
     if flags["ended_early_at_step"] is not None:
         lines += [
             f"**Ended early at step {flags['ended_early_at_step']}** "
-            f"({flags['ended_early_at_step'] * cfg['dt'] / 60:.1f} min); the position rode to the close.",
+            f"({_minutes(flags['ended_early_at_step'], dt)}); the position rode to the close.",
             "",
         ]
+
+    # -- Score ------------------------------------------------------------------
+    names = [b for b, _ in BOT_LABEL if b in bots]
     lines += [
         "## Score",
         "",
-        "| | You | Naive | Disciplined | Flow oracle |",
-        "|---|---|---|---|---|",
+        "| | You | " + " | ".join(label for b, label in BOT_LABEL if b in bots) + " |",
+        "|---" * (2 + len(names)) + "|",
     ]
     for label, key in (("P&L", "pnl_usd"), ("Risk penalty", "risk_penalty_usd"), ("Risk-adjusted", "risk_adjusted_usd")):
-        lines.append(
-            f"| {label} | {_usd(s[key])} | "
-            + " | ".join(_usd(bots[b]["scores"][key]) for b in ("naive", "disciplined", "oracle"))
-            + " |"
-        )
+        lines.append(f"| {label} | {_usd(s[key])} | " + " | ".join(_usd(bots[b]["scores"][key]) for b in names) + " |")
     cr = record["capture_ratio"]
     lines += [
         "",
-        f"Flow-reading capture ratio: P&L {_ratio(cr['pnl']['ratio'])}, risk-adjusted "
+        "*Diagnostic: the passing oracle declines every informed RFQ instead of reading it.",
+        "",
+        f"Flow-reading capture ratio against the flow oracle: P&L {_ratio(cr['pnl']['ratio'])}, risk-adjusted "
         f"{_ratio(cr['risk_adjusted']['ratio'])} (n/a unless the oracle beats the disciplined bot by at least "
-        f"{_usd(cr['min_gap_usd'])}; oracle minus disciplined this session: "
-        f"{_usd(cr['pnl']['oracle_minus_disciplined_usd'])} on P&L, "
-        f"{_usd(cr['risk_adjusted']['oracle_minus_disciplined_usd'])} risk-adjusted).",
-        "",
-        "## Where the P&L came from, against true fair value",
-        "",
-        f"| | {horizon} |",
-        "|---|---|",
-        f"| Spread captured | {_usd(dec['spread_captured_usd'])} |",
-        f"| − Adverse selection ({horizon} mark-outs) | {_usd(dec['by_horizon'][horizon]['adverse_selection_usd'])} |",
-        f"| + Inventory beyond the mark-outs | {_usd(dec['by_horizon'][horizon]['inventory_beyond_usd'])} |",
-        f"| − Hedge and closing costs | {_usd(dec['hedge_and_close_costs_usd'])} |",
-        f"| **Total** | **{_usd(dec['total_usd'])}** |",
-        "",
-        "Adverse selection is money the flow took after you traded; negative means it moved your way.",
-        "",
-        "Adverse selection at each horizon: "
-        + ", ".join(f"{k} {_usd(v['adverse_selection_usd'])}" for k, v in dec["by_horizon"].items())
-        + ". Hedge and closing costs split: venue charge "
-        + f"{_usd(dec['venue_charge_usd'])}, screen error at the hedge {_usd(dec['screen_error_on_hedges_usd'])}.",
-        "",
-        "## Flow",
+        f"{_usd(cr['min_gap_usd'])}; this session it did by {_usd(cr['pnl']['oracle_minus_disciplined_usd'])} "
+        f"on P&L, {_usd(cr['risk_adjusted']['oracle_minus_disciplined_usd'])} risk-adjusted).",
         "",
     ]
+
+    # -- Decomposition --------------------------------------------------------
+    lines += [
+        "## Where the P&L came from, against true fair value",
+        "",
+        "Every line is a contribution to P&L; each column adds up to the total. Adverse "
+        "selection is your fills' mark-outs at that horizon — negative when the flow moved "
+        "against you.",
+        "",
+        "| | " + " | ".join(horizons) + " |",
+        "|---" * (1 + len(horizons)) + "|",
+        "| Spread captured | " + " | ".join(_signed(dec["spread_captured_usd"]) for _ in horizons) + " |",
+        "| Adverse selection | " + " | ".join(_signed(dec["by_horizon"][k]["adverse_selection_usd"]) for k in horizons) + " |",
+        "| Inventory beyond the mark-outs | "
+        + " | ".join(_signed(dec["by_horizon"][k]["inventory_beyond_usd"]) for k in horizons)
+        + " |",
+        "| Hedging and closing | " + " | ".join(_signed(dec["hedging_and_closing_usd"]) for _ in horizons) + " |",
+        "| **Total** | " + " | ".join(f"**{_signed(dec['total_usd'])}**" for _ in horizons) + " |",
+        "",
+        "Adverse selection by who was on the other side (these add up to the line above):",
+        "",
+        "| | " + " | ".join(horizons) + " |",
+        "|---" * (1 + len(horizons)) + "|",
+    ]
+    for t, label in TYPE_LABEL.items():
+        lines.append(
+            f"| {label.capitalize()} | "
+            + " | ".join(_signed(dec["by_horizon"][k]["adverse_selection_by_type_usd"][t]) for k in horizons)
+            + " |"
+        )
+    excluded = ", ".join(f"{k}: {v['fills_excluded']}" for k, v in dec["by_horizon"].items() if v["fills_excluded"])
+    lines += [
+        "",
+        f"Hedging and closing splits into the venue's charge {_signed(dec['venue_charge_usd'])} and the screen's "
+        f"error when you hedged {_signed(dec['screen_error_on_hedges_usd'])}."
+        + (f" Fills left out of adverse selection (mark-out cut off by the close, or no print after): {excluded}; "
+           "their moves stay in inventory." if excluded else ""),
+        "",
+    ]
+
+    # -- Flow -----------------------------------------------------------------
     f = d["flow"]
     hit = d["hit_rate"]
     lines += [
+        "## Flow",
+        "",
         f"- Hit rate {('n/a' if hit is None else f'{hit:.0%}')} of quoted RFQs; by count in competition: "
         + ", ".join(f"{k}: {('n/a' if v is None else f'{v:.0%}')}" for k, v in d["hit_rate_by_comp"].items())
         + ".",
-        f"- Fills: {f['uninformed']['fills']} uninformed ({f['uninformed']['lots']} lots), "
-        f"{f['informed']['fills']} informed ({f['informed']['lots']} lots)"
+        "- Fills: "
+        + "; ".join(f"{f[t]['fills']} {TYPE_LABEL[t]} ({f[t]['lots']} lots)" for t in TYPE_LABEL)
         + (
             f" — {f['informed_share_of_volume']:.0%} of volume against informed clients."
             if f["informed_share_of_volume"] is not None
             else "."
         ),
+        "",
     ]
-    for bucket in ("uninformed", "informed"):
-        m = f[bucket]["markouts"]
-        if m:
-            lines.append(
-                f"- {bucket.capitalize()} mark-outs: "
-                + ", ".join(
-                    f"{k} {_usd(v['pnl_usd'])}" + (f" ({v['excluded']} excluded)" if v["excluded"] else "")
-                    for k, v in m.items()
-                )
-                + "."
-            )
+
+    # -- Clients --------------------------------------------------------------
+    lines += [
+        "## Clients",
+        "",
+        "Mark-outs are P&L contributions from your fills with that client. True type and what "
+        "each informed client knew are revealed now.",
+        "",
+        "| Client | Category | True type | RFQs | Quoted | Won | Lots | Net lots | 60s | 300s | Event | Knew about |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for cid, c in sorted(d["clients"].items(), key=lambda kv: int(kv[0])):
+        knew = "; ".join(
+            f"{k['kind']} {k['index'] + 1}: {'up' if k['signal_direction'] > 0 else 'down'} "
+            f"({'right' if k['right'] else 'wrong'})"
+            for k in c["informed_about"]
+        ) or "—"
+        mk = c["markouts_usd"]
+        lines.append(
+            f"| {cid} | {c['category'].replace('_', ' ')} | {'informed' if c['informed_type'] else 'uninformed'} | "
+            f"{c['rfqs']} | {c['quoted']} | {c['won']} | {c['lots']} | {c['net_lots']:+d} | "
+            f"{_signed(mk['60s']) if c['won'] else '—'} | {_signed(mk['300s']) if c['won'] else '—'} | "
+            f"{_signed(mk['event']) if c['won'] else '—'} | {knew} |"
+        )
+    lines.append("")
+
+    # -- Position, prints and moves -------------------------------------------
     pos = d["position"]
     lines += [
-        "",
-        "## Position and prints",
+        "## Position, prints and moves",
         "",
         f"- Max |position| {pos['max_abs']} lots; time-weighted mean |position| {pos['time_weighted_mean_abs']:.0f}.",
     ]
@@ -529,7 +592,7 @@ def markdown_summary(record: dict[str, Any]) -> str:
         drift = "none" if p["drift_bp"] is None else f"{p['drift_bp']:+.2f}bp"
         react = p["quotes_reflected_print_after"]
         lines.append(
-            f"- Print {p['print_index'] + 1} at {p['step'] * cfg['dt'] / 60:.1f} min: {p['jump_bp']:+.2f}bp, "
+            f"- Print {p['print_index'] + 1} at {_minutes(p['step'], dt)}: {p['jump_bp']:+.2f}bp, "
             f"drift into it {drift}; you carried {p['position_into_print']:+d} lots"
             + (
                 f"; quotes reflected it after {react['seconds']:.0f}s."
@@ -537,6 +600,31 @@ def markdown_summary(record: dict[str, Any]) -> str:
                 else ("; no quotes after it." if not p["two_sided_quotes_after_print"] else "; quotes never moved half the print.")
             )
         )
+    if not pos["moves"]:
+        lines.append("- No unannounced moves this session.")
+    for m in pos["moves"]:
+        react = m["quotes_reflected_move_after"]
+        lines.append(
+            f"- **Unannounced move {m['move_index'] + 1}** at {_minutes(m['start_step'], dt)}: {m['size_bp']:+.2f}bp "
+            f"over {m['duration_s']:.0f}s, leaked to informed clients {m['lead_s'] / 60:.1f} min ahead. "
+            f"You held {m['position_at_inform']:+d} lots when the leak began, {m['position_at_start']:+d} at the "
+            f"start and {m['position_at_end']:+d} at the end"
+            + (f"; quotes reflected it after {react['seconds']:.0f}s." if react else "; quotes never moved half of it.")
+        )
+        for r in m["informed_rfqs"]:
+            side = "buy" if r["client_side"] > 0 else "sell"
+            if not r["shown"]:
+                did = "not shown (after you stopped)"
+            elif r["outcome"] == "won":
+                did = f"you traded {r['your_quantity']:+d} lots"
+            else:
+                did = {"done_away": "done away", "not_done": "client walked", "passed": "you passed"}[r["outcome"]]
+            lines.append(
+                f"  - foretold by RFQ {r['rfq_ordinal']} at {_minutes(r['step'], dt)}: client {r['client_id']} "
+                f"to {side} {r['size']} lots — {did}."
+            )
+
+    # -- Quotes against the truth ------------------------------------------------
     qt, qs = d["quote_vs_truth"], d["quote_vs_screen"]
     lines += ["", "## Quotes against the truth", ""]
     if qt["quotes"]:
@@ -548,16 +636,9 @@ def markdown_summary(record: dict[str, Any]) -> str:
         if ex:
             lines.append(
                 f"- Worst sustained excursion: {ex['quotes']} quotes over {ex['duration_s']:.0f}s from "
-                f"{ex['start_step'] * cfg['dt'] / 60:.1f} min, {ex['mean_error_bp']:+.2f}bp off the truth on average."
+                f"{_minutes(ex['start_step'], dt)}, {ex['mean_error_bp']:+.2f}bp off the truth on average."
             )
-    informed_clients = [k for k, v in d["clients"].items() if v["informed_type"]]
-    lines += [
-        "",
-        "## Clients",
-        "",
-        "Informed type this session: " + (", ".join(f"client {k}" for k in informed_clients) or "none") + ".",
-        "",
-    ]
+    lines.append("")
     return "\n".join(lines)
 
 

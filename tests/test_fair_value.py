@@ -307,10 +307,11 @@ def test_shapes_and_bounds():
 
 
 def test_values_decompose_exactly():
-    """values == start_level + diffusion + drift + jumps, by construction, and
-    the jump lands on the increment into the event step."""
+    """values == start_level + diffusion + drift + jumps + moves, by
+    construction, and the jump lands on the increment into the event step."""
     path = generate(GameConfig(), RngStreams(3))
-    jumps = path.relative - path.diffusion - path.drift
+    assert path.move_list  # the decomposition is exercised with moves in it
+    jumps = path.relative - path.diffusion - path.drift - path.moves
     for e, size in zip(path.event_steps, path.jump_sizes):
         assert math.isclose(jumps[e] - jumps[e - 1], size, rel_tol=0, abs_tol=1e-9)
     # Subtracting three cumsums leaves ~1e-13 residuals everywhere, so count

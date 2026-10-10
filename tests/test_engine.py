@@ -147,7 +147,8 @@ def test_nothing_visible_in_play_moves_with_the_truth():
 # --------------------------------------------------------------------------
 
 HIDDEN_NAMES = {
-    "informed", "signal_bp", "event_index", "base_size", "dealers_in_comp", "client_limit",
+    "informed", "signal_bp", "event_index", "informed_about", "base_size", "dealers_in_comp", "client_limit",
+    "moves", "move_list", "move_index",
     "competitor_bid_ticks", "competitor_ask_ticks", "competitor_mids", "tie_break_u", "true_fair_value",
     "values", "relative", "jump_sizes", "jump_bp", "drift_windows", "screen_error", "screen_error_bp",
     "informed_type", "client_informed_type", "seed", "canary", "markouts", "hidden", "dealers", "market",
@@ -215,7 +216,12 @@ def test_no_hidden_field_appears_in_any_in_session_message():
     the seed (from which everything hidden regenerates). The check that the
     names are real: the post-session record does contain them, so a renamed
     field cannot make this pass by no longer matching."""
-    w = world.generate(GameConfig(), 11)
+    # A session with an unannounced move and a print before the scripted quit,
+    # so move fields exist to leak and every event kind fires.
+    w = next(
+        w for w in (world.generate(GameConfig(), s) for s in range(11, 120))
+        if w.path.move_list and (w.path.event_steps < 0.8 * w.config.n_steps).any()
+    )
     session, msgs = full_exercise(w)
     kinds = {m["kind"] for m in msgs if m["type"] == "event"}
     assert kinds == {k.value for k in Kind}, set(k.value for k in Kind) - kinds
@@ -238,7 +244,8 @@ def test_no_hidden_field_appears_in_any_in_session_message():
     record = records.coaching_record(w, session, scoring=SCORING, benchmark=BENCH, bots={
         b: agents.run_bot(b, w, settings=session.settings, scoring=SCORING, benchmark=BENCH) for b in agents.BOTS
     }, flags=records.flags(session, False))
-    assert {"informed", "signal_bp", "client_limit", "true_fair_value", "seed", "canary", "dealers"} <= keys_in(record)
+    assert {"informed", "signal_bp", "informed_about", "client_limit", "true_fair_value", "seed", "canary",
+            "dealers", "moves", "move_index"} <= keys_in(record)
 
 
 def perturb_after(w: world.World, k: int) -> world.World:

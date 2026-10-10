@@ -68,7 +68,7 @@ def test_headless_session_runs_end_to_end_and_writes_both_files(minutes):
     replay, record, summary = files(storage, g)
     assert replay["format"] == records.REPLAY_FORMAT and replay["actions"]
     assert record["format"] == records.RECORD_FORMAT
-    assert set(record["benchmarks"]) == {"naive", "disciplined", "oracle"}
+    assert set(record["benchmarks"]) == {"naive", "disciplined", "oracle", "passing_oracle"}
     assert {"pnl", "risk_adjusted"} <= set(record["capture_ratio"])
     shown = [r for r in record["rfqs"] if r["shown"]]
     assert shown and all(
@@ -162,6 +162,7 @@ def test_paired_replay_differs_only_from_the_changed_rfq_on(drill_game):
 def test_header_carries_the_config_schema_and_round_trips():
     w = world.generate(GameConfig(), 3)
     assert w.header["config_schema_version"] == CONFIG_SCHEMA_VERSION
+    assert CONFIG_SCHEMA_VERSION == 2  # bumped when unannounced moves were added
     assert w.header["seed"] == 3 and w.header["canary"] == rng.canary()
     assert GameConfig.from_record(json.loads(json.dumps(w.header["config"]))) == GameConfig()
     for cls in (ScoringConfig, BenchmarkConfig):
@@ -272,6 +273,27 @@ def test_benchmarks_play_the_identical_world(monkeypatch):
     bot = real("naive", g._world, settings=g.session.settings, scoring=ScoringConfig(), benchmark=BENCH)
     arrivals = lambda s: [(e.step, e.data) for e in s.log.of(Kind.RFQ_ARRIVED)]
     assert arrivals(bot)[: len(arrivals(g.session))] == arrivals(g.session)
+
+
+def test_summary_reveals_moves_and_every_client():
+    """The summary reveals each unannounced move in its own line under
+    "Position, prints and moves" -- size, ramp, warning, the position, the
+    informed RFQs that foretold it -- and lists every client with true type
+    and what they knew. A record that kept moves only in the JSON would hide
+    the lesson from the review that reads the summary."""
+    cfg = GameConfig.for_session(120)
+    seed = next(s for s in range(100) if len(world.generate(cfg, s).path.move_list) >= 2)
+    g, storage = headless(cfg, seed, preset=120)
+    _, record, summary = files(storage, g)
+    moves = record["diagnostics"]["position"]["moves"]
+    assert len(moves) >= 2
+    assert "## Position, prints and moves" in summary
+    for m in moves:
+        assert f"Unannounced move {m['move_index'] + 1}" in summary
+    assert any(m["informed_rfqs"] for m in moves) and "foretold by RFQ" in summary
+    table = [l for l in summary.splitlines() if l.startswith("| ") and l.split("|")[1].strip().isdigit()]
+    assert len(table) >= cfg.n_clients
+    assert "| Client | Category | True type |" in summary
 
 
 def test_reveal_is_sent_once_and_only_after_the_end(drill_game):

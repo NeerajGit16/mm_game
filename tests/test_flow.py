@@ -34,9 +34,17 @@ FLOW_STREAMS = {
     Stream.FLOW_SIZE,
     Stream.FLOW_DIRECTION,
     Stream.FLOW_INFORMED,
+    Stream.FLOW_INFORMED_MOVE,
     Stream.FLOW_PARTICIPATION,
 }
-FAIR_VALUE_STREAMS = (Stream.FAIR_VALUE, Stream.EVENTS, Stream.JUMPS, Stream.DRIFT, Stream.SCREEN, Stream.SCREEN_PRINT)
+FAIR_VALUE_STREAMS = (
+    Stream.FAIR_VALUE, Stream.EVENTS, Stream.JUMPS, Stream.DRIFT, Stream.SCREEN, Stream.SCREEN_PRINT, Stream.MOVES,
+)
+
+
+def print_index(q) -> int | None:
+    """The print an RFQ is informed about, if it is informed about a print."""
+    return q.informed_about.index if q.informed_about is not None and q.informed_about.kind == "print" else None
 
 # A dense short session for the statistical tests: ten minutes at six times the
 # default rate, ~100 RFQs and ~10 informed per session, so 300 sessions give
@@ -175,9 +183,9 @@ def test_informed_only_inside_windows_and_only_from_informed_types(stat_sessions
                 seen += 1
                 assert q.side == (Side.BUY if q.signal_bp > 0 else Side.SELL)
                 upcoming = np.flatnonzero(path.event_steps > q.step)
-                assert q.event_index == int(upcoming[0])
+                assert print_index(q) == int(upcoming[0])
             else:
-                assert q.signal_bp is None and q.event_index is None
+                assert q.signal_bp is None and q.informed_about is None
     assert seen > 2000
 
 
@@ -188,7 +196,7 @@ def informed_views(stat_sessions):
         seen = {}
         for q in sched.rfqs:
             if q.informed:
-                seen.setdefault((q.client_id, q.event_index), (q.signal_bp, path.jump_sizes[q.event_index]))
+                seen.setdefault((q.client_id, print_index(q)), (q.signal_bp, path.jump_sizes[print_index(q)]))
         views.extend(seen.values())
     return views
 
@@ -221,11 +229,11 @@ def test_an_informed_client_holds_one_view_per_print(stat_sessions):
         by_pair: dict[tuple[int, int], set[float]] = {}
         for q in sched.rfqs:
             if q.informed:
-                by_pair.setdefault((q.client_id, q.event_index), set()).add(q.signal_bp)
+                by_pair.setdefault((q.client_id, print_index(q)), set()).add(q.signal_bp)
         counts = {}
         for q in sched.rfqs:
             if q.informed:
-                counts[(q.client_id, q.event_index)] = counts.get((q.client_id, q.event_index), 0) + 1
+                counts[(q.client_id, print_index(q))] = counts.get((q.client_id, print_index(q)), 0) + 1
         for pair, signals in by_pair.items():
             assert len(signals) == 1
             pairs_with_repeats += counts[pair] >= 2
@@ -650,11 +658,11 @@ def test_public_view_cannot_reach_hidden_fields():
     for q, p in zip(sched.rfqs, pub.rfqs):
         assert p.side == (q.side if q.one_way else None)
         assert p.in_comp == sum(q.dealers_in_comp)
-        for hidden in ("informed", "signal_bp", "event_index", "base_size", "dealers_in_comp"):
+        for hidden in ("informed", "signal_bp", "informed_about", "base_size", "dealers_in_comp"):
             assert not hasattr(p, hidden)
     assert any(p.side is None for p in pub.rfqs) and any(p.side is not None for p in pub.rfqs)
     record = json.dumps(pub.to_record())
-    for hidden in ("informed", "signal", "event_index", "base_size", "dealers_in_comp"):
+    for hidden in ("informed", "signal", "informed_about", "base_size", "dealers_in_comp"):
         assert hidden not in record
 
 

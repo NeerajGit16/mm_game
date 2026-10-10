@@ -88,6 +88,8 @@ class Stream(StrEnum):
     FLOW_DIRECTION = "flow_direction"
     FLOW_INFORMED = "flow_informed"
     FLOW_PARTICIPATION = "flow_participation"
+    MOVES = "moves"
+    FLOW_INFORMED_MOVE = "flow_informed_move"
     COMPETITION = "competition"
     ACCEPTANCE = "acceptance"
     AGENTS = "agents"
