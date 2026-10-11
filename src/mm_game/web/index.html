@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mm_game</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="vendor/uPlot.min.css">
+<link rel="stylesheet" href="style.css">
+<script src="vendor/uPlot.iife.min.js"></script>
+<script type="module" src="js/app.js"></script>
+</head>
+<body>
+<div id="app">
+
+  <!-- Top bar: clock, speed, prints, the book. -->
+  <header id="topbar">
+    <div class="tb"><span class="lbl">Clock</span><span id="clock" class="num big">00:00:00</span><span class="num muted">/ <span id="clock-total">00:00:00</span></span></div>
+    <div class="tb" id="speeds">
+      <button class="btn" data-speed="1" title="1">1×</button>
+      <button class="btn" data-speed="2" title="2">2×</button>
+      <button class="btn" data-speed="4" title="4">4×</button>
+      <button class="btn" id="pause-btn" title="Space">❚❚ Pause</button>
+    </div>
+    <div class="tb"><span class="lbl">Prints</span><span id="prints" class="chips"></span></div>
+    <div class="tb-spacer"></div>
+    <div class="tb"><span class="lbl">Position</span><span id="tb-position" class="num big">0</span></div>
+    <div class="tb"><span class="lbl">P&amp;L</span><span id="tb-pnl" class="num big">$0</span><span id="tb-unreal" class="num muted"></span></div>
+    <div class="tb"><span class="lbl">Penalty</span><span id="tb-penalty" class="num">$0</span></div>
+    <div class="tb"><span class="lbl">Risk-adj.</span><span id="tb-riskadj" class="num big">$0</span></div>
+    <span id="tb-flag" class="flag" hidden>replay · not scored</span>
+    <button class="btn quiet" id="quit-btn" title="Stop trading; the position rides to the close">Quit</button>
+  </header>
+
+  <main id="main">
+    <!-- Left: tabs swap this side only. -->
+    <section id="left">
+      <nav id="tabs">
+        <button class="tab active" data-tab="market">Market</button>
+        <button class="tab" data-tab="pnl">P&amp;L</button>
+        <button class="tab" data-tab="clients">Clients</button>
+        <button class="tab" data-tab="log">Calendar &amp; log</button>
+        <span class="tabhint">Tab cycles · the ticket stays on screen whatever the tab</span>
+      </nav>
+
+      <div class="tab-body" id="tab-market">
+        <div class="panel chart-panel">
+          <div class="panel-head">
+            <span class="title">Screen · last 15 min</span>
+            <span class="legend">
+              <span class="buy">▲</span> you bought <span class="sell">▼</span> you sold
+              <span class="buy">△</span> client bought elsewhere <span class="sell">▽</span> client sold elsewhere
+              <span class="buy">■</span><span class="sell">■</span> hedge
+            </span>
+          </div>
+          <div id="chart"></div>
+        </div>
+        <div class="panel blotter-panel">
+          <div class="panel-head"><span class="title">Blotter</span><span class="muted small">most recent first</span></div>
+          <div class="scroll">
+            <table class="grid" id="blotter">
+              <thead><tr>
+                <th>Time</th><th class="r">RFQ</th><th>Client</th><th class="r">Size</th><th>Type</th>
+                <th class="r">Your bid / ask</th><th>Outcome</th><th>What you learned</th><th class="r">Pos</th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="tab-body placeholder" id="tab-pnl" hidden><p>The P&amp;L tab comes in the next build stage.</p></div>
+      <div class="tab-body placeholder" id="tab-clients" hidden><p>The full client roster comes in the next build stage.</p></div>
+      <div class="tab-body placeholder" id="tab-log" hidden><p>The calendar and event log come in the next build stage.</p></div>
+    </section>
+
+    <!-- Right: the ticket and the compact roster, always visible. -->
+    <aside id="right">
+      <section class="panel" id="ticket">
+        <div class="panel-head"><span class="title" id="ticket-title">RFQ ticket</span><span class="muted small">Timer off</span></div>
+        <div id="ticket-empty" class="empty">No RFQ on the ticket.</div>
+        <div id="ticket-body" hidden>
+          <div class="client-line"><span id="t-client" class="client-name"></span><span id="t-category" class="muted"></span></div>
+          <div class="chips"><span class="chip num" id="t-size"></span><span class="chip" id="t-type"></span><span class="chip" id="t-comp"></span></div>
+          <div class="subpanel" id="t-history"></div>
+        </div>
+        <div class="subpanel quote-box">
+          <div class="quote-head">
+            <span><span class="lbl">Screen</span> <span id="q-screen" class="num"></span></span>
+            <span><span class="lbl">Skew</span> <span id="q-skew" class="num"></span></span>
+            <span><span class="lbl">Width</span> <span id="q-width" class="num"></span></span>
+          </div>
+          <div class="quote-sides">
+            <div class="side buy" id="q-bid-box"><div class="lbl">You buy at</div><div class="price num" id="q-bid"></div><div class="num muted" id="q-bid-pos"></div></div>
+            <div class="side sell" id="q-ask-box"><div class="lbl">You sell at</div><div class="price num" id="q-ask"></div><div class="num muted" id="q-ask-pos"></div></div>
+          </div>
+          <div id="q-notice" class="notice"></div>
+          <div class="keyrow">
+            <button class="key" data-act="skew-down" title="←">←</button><button class="key" data-act="skew-up" title="→">→</button><span class="muted small">skew</span>
+            <button class="key" data-act="wider" title="↑">↑</button><button class="key" data-act="tighter" title="↓">↓</button><span class="muted small">width</span>
+            <button class="key" data-act="reset" title="0">0</button><span class="muted small">reset</span>
+            <button class="key wide" data-act="send" title="Enter">Enter</button><span class="muted small">send</span>
+            <button class="key" data-act="pass" title="P">P</button><span class="muted small">pass</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" id="roster">
+        <div class="panel-head"><span class="title">Clients</span><span class="muted small">click a column to sort</span></div>
+        <div class="scroll">
+          <table class="grid" id="roster-table">
+            <thead><tr>
+              <th data-sort="client_id">Client</th><th class="r" data-sort="rfqs">RFQs</th><th class="r" data-sort="traded">Traded</th>
+              <th class="r" data-sort="net">Your net</th><th class="r" data-sort="60s">60s / lot</th><th class="r" data-sort="300s">300s / lot</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </aside>
+  </main>
+
+  <!-- Risk strip: always visible. -->
+  <footer id="riskstrip">
+    <div class="rs-cell">
+      <div class="rs-head"><span class="lbl">Position vs limit</span><span id="rs-pos" class="num big"></span></div>
+      <div class="bar"><div class="bar-zero"></div><div class="bar-fill" id="pos-fill"></div></div>
+      <div class="scale num muted"><span id="lim-lo">−200</span><span>0</span><span id="lim-hi">+200</span></div>
+    </div>
+    <div class="rs-cell">
+      <div class="rs-head"><span class="lbl" id="pr-title">Print risk</span><span id="pr-text" class="num"></span></div>
+      <div class="gauge"><div class="gauge-marker" id="pr-marker"></div></div>
+      <div class="scale num muted"><span>flat</span><span>±50</span><span>±100+</span></div>
+    </div>
+    <div class="rs-cell hedge-cell">
+      <div class="rs-head"><span class="lbl">Hedge at the venue</span><span id="venue-cost" class="muted num small"></span></div>
+      <div class="hedge-buttons">
+        <button class="btn buy" data-hedge="10" title="Q">BUY 10 <kbd>Q</kbd></button>
+        <button class="btn buy" data-hedge="25" title="W">BUY 25 <kbd>W</kbd></button>
+        <button class="btn buy" data-hedge="50" title="E">BUY 50 <kbd>E</kbd></button>
+        <button class="btn sell" data-hedge="-10" title="A">SELL 10 <kbd>A</kbd></button>
+        <button class="btn sell" data-hedge="-25" title="S">SELL 25 <kbd>S</kbd></button>
+        <button class="btn sell" data-hedge="-50" title="D">SELL 50 <kbd>D</kbd></button>
+        <button class="btn" data-act="sizebox" title="H">SIZE… <kbd>H</kbd></button>
+        <button class="btn" data-act="flatten" title="F twice">FLATTEN <kbd>F F</kbd></button>
+      </div>
+      <div id="hedge-notice" class="notice"></div>
+    </div>
+  </footer>
+</div>
+
+<!-- The size box: while it is open, keys go to it only. -->
+<div id="sizebox" class="modal" hidden>
+  <div class="lbl">Hedge size</div>
+  <div id="sizebox-value" class="num huge">_</div>
+  <div class="muted small">type the size, then <kbd>B</kbd> buy or <kbd>S</kbd> sell · <kbd>Esc</kbd> cancels</div>
+  <div class="pad">
+    <button class="key" data-digit="1">1</button><button class="key" data-digit="2">2</button><button class="key" data-digit="3">3</button>
+    <button class="key" data-digit="4">4</button><button class="key" data-digit="5">5</button><button class="key" data-digit="6">6</button>
+    <button class="key" data-digit="7">7</button><button class="key" data-digit="8">8</button><button class="key" data-digit="9">9</button>
+    <button class="key" data-act="box-back">⌫</button><button class="key" data-digit="0">0</button><button class="key" data-act="box-cancel">Esc</button>
+  </div>
+  <div class="box-actions">
+    <button class="btn buy" data-act="box-buy">BUY <kbd>B</kbd></button>
+    <button class="btn sell" data-act="box-sell">SELL <kbd>S</kbd></button>
+  </div>
+</div>
+
+<div id="hint" class="hint" hidden></div>
+<div id="toasts"></div>
+
+<div id="startscreen" class="cover">
+  <div class="card">
+    <h1 id="start-title">Session</h1>
+    <p id="start-flag" class="flag" hidden>Replay of a seed you have played: not scored in the track record.</p>
+    <p>The clock starts when you press <kbd>Space</kbd>. It stops whenever an RFQ is on the ticket.</p>
+    <button class="btn primary" id="start-btn">Start <kbd>Space</kbd></button>
+    <table class="keymap">
+      <tr><td><kbd>←</kbd><kbd>→</kbd></td><td>skew down / up a tick</td><td><kbd>Q</kbd><kbd>W</kbd><kbd>E</kbd></td><td>buy 10 / 25 / 50</td></tr>
+      <tr><td><kbd>↑</kbd><kbd>↓</kbd></td><td>wider / tighter a tick a side</td><td><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></td><td>sell 10 / 25 / 50</td></tr>
+      <tr><td><kbd>0</kbd></td><td>skew back to zero</td><td><kbd>H</kbd></td><td>size box: digits, then <kbd>B</kbd>/<kbd>S</kbd></td></tr>
+      <tr><td><kbd>Enter</kbd> <kbd>P</kbd></td><td>send / pass</td><td><kbd>F</kbd> <kbd>F</kbd></td><td>flatten (twice within a second)</td></tr>
+      <tr><td><kbd>Space</kbd></td><td>pause / resume</td><td><kbd>1</kbd><kbd>2</kbd><kbd>4</kbd> <kbd>Tab</kbd></td><td>speed · next tab</td></tr>
+    </table>
+  </div>
+</div>
+
+<div id="endscreen" class="cover" hidden>
+  <div class="card end">
+    <div class="end-head"><h1>Session over</h1><span class="muted small">Coaching record saved: <span id="end-saved" class="num"></span></span></div>
+    <div id="end-summary" class="md"></div>
+  </div>
+</div>
+</body>
+</html>

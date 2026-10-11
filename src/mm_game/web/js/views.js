@@ -1,0 +1,334 @@
+// Rendering. Every number on screen comes from the store: the engine's
+// snapshot, the desk, and the public events. Nothing is computed here that
+// the desk or the engine has not already put on the wire, except the
+// quote being built and where your position lands if it is hit.
+
+import { CATEGORY, ago, bp, clock, escapeHtml, mmss, price, signedInt, tone, usd } from "./format.js";
+import { quotePrices } from "./keys.js";
+import { renderMarkdown } from "./markdown.js";
+
+const $ = (id) => document.getElementById(id);
+const TABS = ["market", "pnl", "clients", "log"];
+let activeTab = "market";
+let rosterSort = { key: "client_id", dir: 1 };
+let lastDesk = null;
+let lastTicketOrdinal = null;
+let lastRosterHighlight = null;
+
+const short = (cat) => (CATEGORY[cat] || [cat])[0];
+const long = (cat) => (CATEGORY[cat] || [cat, cat])[1];
+const set = (id, text) => { const el = $(id); if (el.textContent !== text) el.textContent = text; };
+const setClass = (el, cls) => { if (el.className !== cls) el.className = cls; };
+
+// -- top bar --------------------------------------------------------------------
+
+function renderTopbar(store) {
+  const st = store.state;
+  set("clock", clock(st.time_s));
+  set("clock-total", clock(store.nSteps * store.dt));
+  for (const b of document.querySelectorAll("#speeds [data-speed]")) {
+    b.classList.toggle("active", Number(b.dataset.speed) === st.clock.speed);
+  }
+  set("pause-btn", st.clock.paused ? "▶ Resume" : "❚❚ Pause");
+  const chips = store.printSteps.map((step, i) => {
+    const t = step * store.dt;
+    if (t <= st.time_s) return `<span class="chip done num">#${i + 1} ${mmss(t)} · done</span>`;
+    const next = store.printSteps.findIndex((s) => s * store.dt > st.time_s) === i;
+    return `<span class="chip num${next ? " next" : ""}">#${i + 1} ${mmss(t)}${next ? ` · in ${mmss(t - st.time_s)}` : ""}</span>`;
+  });
+  const html = chips.join("") || '<span class="muted">none</span>';
+  if ($("prints").innerHTML !== html) $("prints").innerHTML = html;
+
+  const b = st.book;
+  set("tb-position", signedInt(b.position));
+  set("tb-pnl", usd(b.total_usd));
+  setClass($("tb-pnl"), `num big ${tone(b.total_usd)}`);
+  set("tb-unreal", `(unreal. ${usd(b.unrealised_usd)})`);
+  const penalty = -st.risk.penalty_so_far_usd;
+  set("tb-penalty", usd(penalty));
+  setClass($("tb-penalty"), `num ${tone(penalty)}`);
+  const adj = b.total_usd - st.risk.penalty_so_far_usd;
+  set("tb-riskadj", usd(adj));
+  setClass($("tb-riskadj"), `num big ${tone(adj)}`);
+  $("tb-flag").hidden = !store.replayOfPlayedSeed;
+}
+
+// -- ticket ---------------------------------------------------------------------
+
+function clientDesk(store, id) {
+  return store.desk ? store.desk.clients.find((c) => c.client_id === id) : null;
+}
+
+function recentLine(store, r) {
+  const t = mmss(r.step * store.dt);
+  let what;
+  if (r.outcome === "won") {
+    const m = r.markout_bp_per_lot;
+    const mark = m["300s"] !== null ? `300s ${bp(m["300s"])}/lot` : m["60s"] !== null ? `60s ${bp(m["60s"])}/lot` : "marking out";
+    what = `you ${r.quantity > 0 ? "bought" : "sold"} · ${mark}`;
+  } else if (r.outcome === "done_away") {
+    what = `done away · client ${r.client_side === 1 ? "bought" : "sold"} at ${price(r.level)}`;
+  } else if (r.outcome === "not_done") {
+    what = "not done";
+  } else {
+    what = "you passed";
+  }
+  return `<div><span class="muted">${t}</span>  ${String(r.size).padStart(3, " ")}  ${escapeHtml(what)}</div>`;
+}
+
+function renderHistory(store, ticket) {
+  const c = clientDesk(store, ticket.client_id);
+  if (!c) return "";
+  const m = c.markout_bp_per_lot;
+  const last = c.last_trade_step === null ? "—" : ago((store.state.step - c.last_trade_step) * store.dt);
+  const lines = c.recent.map((r) => recentLine(store, r)).join("") || '<div class="muted">no history yet</div>';
+  return `
+    <div class="lbl" style="margin-bottom:6px">Your history with client ${c.client_id} (marked against the screen)</div>
+    <div class="hist-grid">
+      <div><div class="lbl">RFQs</div><div class="v">${c.rfqs}</div></div>
+      <div><div class="lbl">Traded</div><div class="v">${c.traded}</div></div>
+      <div><div class="lbl">Your net</div><div class="v">${signedInt(c.net)}</div></div>
+      <div><div class="lbl">Last trade</div><div class="v">${last}</div></div>
+      <div style="grid-column: span 2"><div class="lbl">60s mark-out / lot</div><div class="v ${tone(m["60s"])}">${bp(m["60s"])}</div></div>
+      <div style="grid-column: span 2"><div class="lbl">300s mark-out / lot</div><div class="v ${tone(m["300s"])}">${bp(m["300s"])}</div></div>
+    </div>
+    <div class="hist-lines">${lines}</div>`;
+}
+
+function renderTicket(store, controls) {
+  const st = store.state;
+  const t = st.ticket;
+  const k = controls.state;
+  $("ticket").classList.toggle("live", !!t);
+  $("ticket-empty").hidden = !!t;
+  $("ticket-body").hidden = !t;
+  set("ticket-title", t ? `RFQ ticket · #${t.ordinal}` : "RFQ ticket");
+  if (t) {
+    set("t-client", `Client ${t.client_id}`);
+    set("t-category", `· ${long(t.category)}`);
+    set("t-size", `${t.size} lots`);
+    set("t-type", t.one_way ? (t.side === 1 ? "client buys" : "client sells") : "two-way");
+    set("t-comp", t.in_comp === 0 ? "in comp: none" : `in comp: ${t.in_comp} dealer${t.in_comp > 1 ? "s" : ""}`);
+    const key = `${t.ordinal}:${store.desk ? store.desk.step : 0}`;
+    if (lastTicketOrdinal !== key) {
+      $("t-history").innerHTML = renderHistory(store, t);
+      lastTicketOrdinal = key;
+    }
+  }
+  const mid = st.screen.mid;
+  set("q-screen", price(mid));
+  set("q-skew", `${k.skew > 0 ? "+" : k.skew < 0 ? "−" : ""}${Math.abs(k.skew)} tick${Math.abs(k.skew) === 1 ? "" : "s"}`);
+  set("q-width", `±${k.halfWidth} tick${k.halfWidth === 1 ? "" : "s"}`);
+  const two = quotePrices(mid, k.skew, k.halfWidth, store.tick, null);
+  const sent = quotePrices(mid, k.skew, k.halfWidth, store.tick, t);
+  const pos = st.book.position;
+  const blocked = t ? t.blocked_sides : [];
+  for (const [side, id, p, landing] of [
+    ["bid", "q-bid", two.bid, t ? pos + t.size : null],
+    ["ask", "q-ask", two.ask, t ? pos - t.size : null],
+  ]) {
+    set(id, price(p));
+    const off = t && sent[side] === null;
+    const isBlocked = blocked.includes(side);
+    set(`${id}-pos`, !t ? "" : off ? "not asked" : isBlocked ? "blocked: past the limit" : `position → ${signedInt(landing)}`);
+    setClass($(`${id}-box`), `side ${side === "bid" ? "buy" : "sell"}${off ? " off" : ""}${isBlocked && !off ? " blocked" : ""}`);
+  }
+  const block = store.lastBlock;
+  const note = block && t && block.rfq_ordinal === t.ordinal ? `Limit blocked your ${block.sides.join(" and ")}.` : "";
+  set("q-notice", note);
+}
+
+// -- blotter --------------------------------------------------------------------
+
+function outcomeText(r) {
+  if (r.outcome === null) return "on the ticket";
+  if (r.outcome === "won") return `WON · you ${r.quantity > 0 ? "bought" : "sold"}`;
+  return { done_away: "DONE AWAY", not_done: "NOT DONE", passed: "PASSED" }[r.outcome];
+}
+
+function learnedText(r) {
+  if (r.outcome === "won") return r.learned.cover === null ? "no cover: nobody else in" : `cover ${price(r.learned.cover)}`;
+  if (r.outcome === "done_away") return `client ${r.learned.side === 1 ? "bought" : "sold"} at ${price(r.learned.level)}`;
+  return r.outcome === null ? "" : "nothing";
+}
+
+function renderBlotter(store) {
+  const rows = store.desk.blotter.slice(0, 300).map((r) => {
+    const type = r.one_way ? (r.side === 1 ? "client buys" : "client sells") : "two-way";
+    const quoted = r.outcome === "passed" || (r.bid === null && r.ask === null) ? "—" : `${price(r.bid)} / ${price(r.ask)}`;
+    return `<tr class="${r.outcome === null ? "pending" : ""}">
+      <td>${mmss(r.step * store.dt)}</td><td class="r">${r.ordinal}</td><td>C${r.client_id} · ${short(r.category)}</td>
+      <td class="r">${r.size}</td><td>${type}</td><td class="r">${r.outcome === null ? "" : quoted}</td>
+      <td>${outcomeText(r)}</td><td>${learnedText(r)}</td>
+      <td class="r">${r.position_after === null ? "" : signedInt(r.position_after)}</td></tr>`;
+  });
+  document.querySelector("#blotter tbody").innerHTML = rows.join("");
+}
+
+// -- roster ---------------------------------------------------------------------
+
+function sortValue(c, key) {
+  if (key === "60s" || key === "300s") return c.markout_bp_per_lot[key] ?? -Infinity;
+  return c[key];
+}
+
+function renderRoster(store) {
+  const highlight = store.state.ticket ? store.state.ticket.client_id : null;
+  const clients = [...store.desk.clients].sort(
+    (a, b) => rosterSort.dir * (sortValue(a, rosterSort.key) - sortValue(b, rosterSort.key)) || a.client_id - b.client_id,
+  );
+  document.querySelector("#roster-table tbody").innerHTML = clients.map((c) => {
+    const m = c.markout_bp_per_lot;
+    return `<tr class="${c.client_id === highlight ? "highlight" : ""}">
+      <td>C${c.client_id} · ${short(c.category)}</td><td class="r">${c.rfqs}</td><td class="r">${c.traded}</td>
+      <td class="r">${signedInt(c.net)}</td>
+      <td class="r ${tone(m["60s"])}">${bp(m["60s"]).replace("bp", "")}</td>
+      <td class="r ${tone(m["300s"])}">${bp(m["300s"]).replace("bp", "")}</td></tr>`;
+  }).join("");
+  for (const th of document.querySelectorAll("#roster-table th")) th.classList.toggle("sorted", th.dataset.sort === rosterSort.key);
+  lastRosterHighlight = highlight;
+}
+
+// -- risk strip -----------------------------------------------------------------
+
+function renderRisk(store) {
+  const st = store.state;
+  const pos = st.book.position;
+  const limit = st.book.limit;
+  set("rs-pos", `${signedInt(pos)} lots`);
+  set("lim-lo", `−${limit}`);
+  set("lim-hi", `+${limit}`);
+  const fill = $("pos-fill");
+  const frac = Math.min(Math.abs(pos) / limit, 1) * 50;
+  fill.style.left = pos >= 0 ? "50%" : `${50 - frac}%`;
+  fill.style.width = `${frac}%`;
+  setClass(fill, `bar-fill${pos < 0 ? " short" : ""}${Math.abs(pos) >= 0.8 * limit ? " near" : ""}`);
+
+  const np = st.risk.next_print;
+  if (np) {
+    set("pr-title", `Print risk · #${np.print_index + 1} in ${mmss(np.in_s)}`);
+    set("pr-text", `carry ${signedInt(pos)} → ≈ ${usd(np.penalty_if_held_usd, false)} penalty`);
+  } else {
+    set("pr-title", "Print risk");
+    set("pr-text", "no more prints");
+  }
+  $("pr-marker").style.left = `calc(${Math.min(Math.abs(pos) / 100, 1) * 100}% - 1px)`;
+
+  const costs = st.venue.quotes.map((q) => `${q.size}: ${q.cost_bp_per_lot.toFixed(2)}`).join(" · ");
+  set("venue-cost", `now ${costs} bp/lot${st.venue.near_print ? " · wider: near a print" : " · wider near prints"}`);
+
+  const h = store.lastHedge;
+  const el = $("hedge-notice");
+  if (h) {
+    let text;
+    if (h.quantity === 0) text = `Hedge refused: at the ±${limit} limit (asked ${signedInt(h.requested)}).`;
+    else {
+      const did = `${h.quantity > 0 ? "Bought" : "Sold"} ${Math.abs(h.quantity)} at ${price(h.price)} (${h.cost_bp_per_lot.toFixed(2)}bp/lot), position ${signedInt(h.position_after)}`;
+      text = h.clipped ? `Hedge clipped by the ±${limit} limit: asked ${signedInt(h.requested)}, filled ${signedInt(h.quantity)}. ${did}.` : `${did}.`;
+    }
+    set("hedge-notice", `${mmss(h.step * store.dt)} · ${text}`);
+    setClass(el, `notice${h.clipped ? " warn" : ""}`);
+  }
+}
+
+// -- overlays -------------------------------------------------------------------
+
+let hintTimer = null;
+export function setHint(text, ms = 1500) {
+  const el = $("hint");
+  clearTimeout(hintTimer);
+  if (!text) { el.hidden = true; return; }
+  el.textContent = text;
+  el.hidden = false;
+  hintTimer = setTimeout(() => { el.hidden = true; }, ms);
+}
+
+export function setBox(box) {
+  $("sizebox").hidden = !box;
+  if (box) set("sizebox-value", box.text || "_");
+}
+
+let shownErrors = 0;
+function renderToasts(store) {
+  while (shownErrors < store.errors.length) {
+    const e = store.errors[shownErrors++];
+    const el = document.createElement("div");
+    el.className = "toast";
+    el.textContent = e.detail;
+    $("toasts").appendChild(el);
+    setTimeout(() => el.remove(), 4000);
+  }
+}
+
+function renderScreens(store) {
+  const preset = store.preset ? `${store.preset}-minute session` : "Session";
+  set("start-title", preset);
+  $("start-flag").hidden = !store.replayOfPlayedSeed;
+  $("startscreen").hidden = store.begun || !!store.summary;
+  if (store.summary && $("endscreen").hidden) {
+    $("end-summary").innerHTML = renderMarkdown(store.summary.markdown);
+    set("end-saved", store.summary.saved_to);
+    $("endscreen").hidden = false;
+    $("sizebox").hidden = true;
+  }
+}
+
+export function cycleTab() {
+  showTab(TABS[(TABS.indexOf(activeTab) + 1) % TABS.length]);
+}
+
+function showTab(name) {
+  activeTab = name;
+  for (const b of document.querySelectorAll("#tabs .tab")) b.classList.toggle("active", b.dataset.tab === name);
+  for (const t of TABS) $(`tab-${t}`).hidden = t !== name;
+  window.dispatchEvent(new Event("resize"));
+}
+
+export function disconnected() {
+  const el = document.createElement("div");
+  el.className = "toast";
+  el.textContent = "Disconnected from the server. Reload the page once it is running again.";
+  $("toasts").appendChild(el);
+}
+
+// -- wiring ---------------------------------------------------------------------
+
+export function bindButtons(controls, rerender) {
+  const a = controls.actions;
+  const on = (sel, fn) => document.querySelectorAll(sel).forEach((el) => el.addEventListener("click", (e) => { fn(el, e); el.blur(); }));
+  on("#speeds [data-speed]", (el) => a.speed(Number(el.dataset.speed)));
+  on("#pause-btn", () => a.togglePause());
+  on("#start-btn", () => a.togglePause());
+  on("#quit-btn", () => { if (confirm("Stop trading? Your position rides to the close.")) a.quit(); });
+  on("[data-hedge]", (el) => a.hedge(Number(el.dataset.hedge)));
+  on("[data-digit]", (el) => a.boxDigit(el.dataset.digit));
+  const acts = {
+    "skew-down": () => a.skew(-1), "skew-up": () => a.skew(1), wider: () => a.width(1), tighter: () => a.width(-1),
+    reset: () => a.resetSkew(), send: () => a.send(), pass: () => a.pass(), sizebox: () => a.openBox(),
+    flatten: () => a.flattenPress(), "box-back": () => a.boxBack(), "box-cancel": () => a.boxCancel(),
+    "box-buy": () => a.boxTrade(1), "box-sell": () => a.boxTrade(-1),
+  };
+  on("[data-act]", (el) => acts[el.dataset.act]());
+  on("#tabs .tab", (el) => { showTab(el.dataset.tab); rerender(); });
+  on("#roster-table th[data-sort]", (el) => {
+    const key = el.dataset.sort;
+    rosterSort = { key, dir: rosterSort.key === key ? -rosterSort.dir : key === "client_id" ? 1 : -1 };
+    lastDesk = null;
+    rerender();
+  });
+}
+
+export function render(store, controls) {
+  renderScreens(store);
+  renderToasts(store);
+  if (!store.state) return;
+  renderTopbar(store);
+  renderTicket(store, controls);
+  renderRisk(store);
+  const highlight = store.state.ticket ? store.state.ticket.client_id : null;
+  if (store.desk && (store.desk !== lastDesk || highlight !== lastRosterHighlight)) {
+    renderBlotter(store);
+    renderRoster(store);
+    lastDesk = store.desk;
+  }
+}

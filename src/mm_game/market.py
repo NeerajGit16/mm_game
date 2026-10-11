@@ -59,13 +59,24 @@ class HedgeFill:
         }
 
 
+def cost_bp_per_lot(step: int, size: int, public: PublicView, config: GameConfig) -> float:
+    """The per-lot charge against the screen for a hedge of ``size`` lots at
+    ``step``: what the venue would charge now. Public: size, the calendar and
+    the config."""
+    return config.hedge_cost_bp_at(abs(size), public.seconds_to_nearest_print(step))
+
+
+def near_print(step: int, public: PublicView, config: GameConfig) -> bool:
+    """Whether ``step`` is inside the venue's widening window around a print."""
+    return public.seconds_to_nearest_print(step) < config.hedge_print_window_s
+
+
 def _execute(
     step: int, requested: int, quantity: int, public: PublicView, config: GameConfig, multiplier: float
 ) -> HedgeFill:
     if quantity == 0:
         return HedgeFill(step, requested, 0, None, 0.0, requested != 0)
-    seconds = public.seconds_to_nearest_print(step)
-    cost_bp = config.hedge_cost_bp_at(abs(quantity), seconds) * multiplier
+    cost_bp = cost_bp_per_lot(step, quantity, public, config) * multiplier
     direction = 1 if quantity > 0 else -1
     price = public.screen_at(step) + direction * cost_bp
     return HedgeFill(step, requested, quantity, price, cost_bp, quantity != requested)

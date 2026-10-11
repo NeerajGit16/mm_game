@@ -7,6 +7,7 @@ requires-python = ">=3.11"
 dependencies = [
     "matplotlib>=3.9.4",
     "numpy>=2.0.2",
+    "tornado>=6.4",
 ]
 
 [project.scripts]
@@ -19,5 +20,6 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "jupyter>=1.1.1",
+    "playwright>=1.47",
     "pytest>=8.4.2",
 ]

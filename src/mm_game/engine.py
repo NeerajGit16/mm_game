@@ -404,6 +404,13 @@ class Session:
                 "next_print": print_risk(self._config, self._scoring, self._print_steps, self.step, position),
             },
             "ticket": ticket,
+            "venue": {
+                "quotes": [
+                    {"size": size, "cost_bp_per_lot": market.cost_bp_per_lot(self.step, size, self._view, self._config)}
+                    for size in protocol.VENUE_QUOTE_SIZES
+                ],
+                "near_print": market.near_print(self.step, self._view, self._config),
+            },
         }
 
 

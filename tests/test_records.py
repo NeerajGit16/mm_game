@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 
 import mm_game
-from mm_game import agents, game, records, rng, world
+from mm_game import agents, game, protocol, records, rng, world
 from mm_game.config import CONFIG_SCHEMA_VERSION, BenchmarkConfig, GameConfig, ScoringConfig
 from mm_game.engine import Settings
 from mm_game.events import Kind
@@ -302,7 +302,7 @@ def test_summary_reveals_moves_and_every_client():
 def test_reveal_is_sent_once_and_only_after_the_end(drill_game):
     g, _ = drill_game
     assert g.record is not None
-    assert g.handle({"v": 1, "type": "pause"})[0]["type"] == "error"  # nothing after the end
+    assert g.handle({"v": protocol.PROTOCOL_VERSION, "type": "pause"})[0]["type"] == "error"  # nothing after the end
 
 
 # --------------------------------------------------------------------------
@@ -315,13 +315,19 @@ def test_only_the_storage_layer_touches_files():
     download or local storage later. Any other module opening a file, or
     reaching for pathlib or os to write one, would be a second path the
     in-browser build has to find."""
-    pattern = re.compile(r"\bopen\(|\.write_text\(|\.read_text\(|^\s*import (os|shutil|io)\b|from pathlib", re.M)
+    # The builtin open(), not a method or a definition named open (a
+    # websocket handler's open, webbrowser.open).
+    pattern = re.compile(
+        r"(?<![.\w])(?<!def )open\(|\.write_text\(|\.read_text\(|^\s*import (os|shutil|io)\b|from pathlib", re.M
+    )
     for path in SRC_DIR.glob("*.py"):
         if path.name == "storage.py":
             continue
         code = path.read_text(encoding="utf-8")
         hits = [m.group(0) for m in pattern.finditer(code)]
         allowed = {".write_text(", ".read_text("} if path.name in ("game.py", "records.py") else set()
+        if path.name == "server.py":  # it finds the front end's static files, never a record
+            allowed = {"from pathlib"}
         assert set(hits) <= allowed, (path.name, hits)
         for line in code.splitlines():
             if ".write_text(" in line or ".read_text(" in line:

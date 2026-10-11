@@ -27,12 +27,16 @@ from typing import Any
 
 from mm_game.events import Event
 
-PROTOCOL_VERSION: int = 1
+PROTOCOL_VERSION: int = 2  # 2: the snapshot carries the venue's current cost
 
 # Speeds a front end may run the clock at. Presentation only: the world is
 # fixed in steps, and speed changes are logged so a review can say "you were
 # at 4x when the print hit".
 SPEEDS: frozenset[int] = frozenset({1, 2, 4})
+
+# Hedge sizes the snapshot prices the venue at, so a front end can show what
+# its hedge buttons would cost now without reimplementing the cost model.
+VENUE_QUOTE_SIZES: tuple[int, ...] = (10, 25, 50)
 
 
 class ActionType(StrEnum):

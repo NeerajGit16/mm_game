@@ -437,7 +437,7 @@ def test_front_end_inputs_are_logged_and_change_nothing_in_the_world():
 @pytest.mark.parametrize(
     "message",
     [
-        {"v": 2, "type": "pass", "rfq_ordinal": 0},  # future protocol version
+        {"v": V + 1, "type": "pass", "rfq_ordinal": 0},  # future protocol version
         {"type": "pass", "rfq_ordinal": 0},  # no version
         {"v": V, "type": "teleport"},
         {"v": V, "type": "hedge", "quantity": 0},
@@ -492,8 +492,12 @@ def test_events_refuse_undeclared_fields():
 
 def test_engine_needs_no_threads_or_processes():
     """In-browser capable: nothing in the package imports threading,
-    multiprocessing, asyncio or subprocess."""
+    multiprocessing, asyncio or subprocess -- except ``server.py``, the
+    local route's websocket transport, which an in-browser build replaces.
+    The session and everything hosting it (``host.py``) stay checked."""
     for path in SRC_DIR.glob("*.py"):
+        if path.name == "server.py":
+            continue
         code = code_only(path.read_text(encoding="utf-8"))
         assert not re.search(r"^\s*(import|from)\s+(threading|multiprocessing|asyncio|subprocess|concurrent)", code, re.M), path.name
 
