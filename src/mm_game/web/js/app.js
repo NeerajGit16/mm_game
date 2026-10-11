@@ -7,6 +7,7 @@ import { createControls, quotePrices } from "./keys.js";
 import { createMarketChart, createSessionCharts } from "./chart.js";
 import * as views from "./views.js";
 import * as tabs from "./tabs.js";
+import { showReveal } from "./reveal.js";
 
 const store = createStore();
 /** @type {WebSocket | null} */
@@ -48,11 +49,35 @@ function currentQuote() {
 const market = createMarketChart(views.$("chart"), store, currentQuote);
 const session = createSessionCharts(views.$("pnl-chart"), views.$("pos-chart"), store);
 
+let revealed = false;
 function render() {
+  if (revealed) return;
+  // The session is over once the coaching record, its summary and the
+  // track record have arrived: the reveal takes the page.
+  if (store.record && store.summary && store.track) {
+    revealed = true;
+    showReveal({ record: store.record, track: store.track, savedTo: store.summary.saved_to, sessionId: store.summary.session_id });
+    return;
+  }
   views.render(store, controls);
   tabs.renderTabs(store);
   if (tabs.isActive("market")) market.update();
   if (tabs.isActive("pnl")) session.update();
+}
+
+/**
+ * A saved session's reveal, with no game running: the record and the
+ * track record come from the server's records, not a websocket.
+ * @param {string} sessionId
+ */
+async function openSaved(sessionId) {
+  revealed = true;
+  const record = await fetch(`/record/${encodeURIComponent(sessionId)}`).then((r) => {
+    if (!r.ok) throw new Error(`no saved session ${sessionId}`);
+    return r.json();
+  });
+  const track = await fetch("/track").then((r) => (r.ok ? r.json() : null));
+  showReveal({ record, track, savedTo: `sessions/${sessionId}/`, sessionId });
 }
 
 function connect() {
@@ -64,12 +89,22 @@ function connect() {
   socket.onclose = () => views.disconnected();
 }
 
-document.addEventListener("keydown", (e) => {
-  if (controls.onKey(e)) e.preventDefault();
-});
-views.bindButtons(controls, schedule);
-tabs.bindTabs(schedule);
-connect();
+const saved = new URLSearchParams(location.search).get("reveal");
+if (saved) {
+  openSaved(saved).catch((error) => {
+    const toast = document.createElement("div");
+    toast.className = "toast";
+    toast.textContent = String(error.message);
+    views.$("toasts").appendChild(toast);
+  });
+} else {
+  document.addEventListener("keydown", (e) => {
+    if (!revealed && controls.onKey(e)) e.preventDefault();
+  });
+  views.bindButtons(controls, schedule);
+  tabs.bindTabs(schedule);
+  connect();
+}
 
 // For the console and the browser tests.
 /** @type {any} */ (window).mm = { store, controls };

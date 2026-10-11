@@ -32,6 +32,7 @@ kbd {
   border-radius: 4px; background: #0e1216; color: var(--ink);
 }
 
+#app[hidden] { display: none; }
 #app {
   display: grid; height: 100vh; min-width: 1280px;
   grid-template-rows: auto 1fr auto;
@@ -177,7 +178,6 @@ table.grid tr.highlight td { background: #1d2530; }
 .card h1 { margin: 0 0 10px; font-size: 22px; }
 .keymap { margin-top: 18px; border-collapse: collapse; color: var(--muted); }
 .keymap td { padding: 4px 10px 4px 0; }
-.card.end { max-width: 1100px; width: 92vw; max-height: 92vh; overflow: auto; }
 .end-head { display: flex; justify-content: space-between; align-items: baseline; gap: 20px; }
 
 /* the rendered summary.md */
@@ -219,3 +219,53 @@ table.sortable th.sorted { color: var(--ink); }
 .handbook ul { margin: 4px 0 6px; padding-left: 20px; }
 .handbook li { line-height: 1.5; color: #c9ced4; margin-bottom: 3px; }
 .handbook .locked { color: var(--accent); border: 1px dashed var(--accent); border-radius: 8px; padding: 8px 12px; display: inline-block; }
+
+/* -- the reveal ------------------------------------------------------------- */
+#reveal { display: grid; grid-template-rows: auto auto 1fr; height: 100vh; padding: 10px; row-gap: 8px; min-width: 1280px; }
+#reveal[hidden] { display: none; }
+.rv-head { display: flex; align-items: baseline; gap: 18px; padding: 8px 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+.rv-head h1 { margin: 0; font-size: 18px; }
+.rv-saved { margin-left: auto; }
+.rv-tabs { display: flex; gap: 2px; }
+.rv-body { min-height: 0; }
+.rv-body[hidden] { display: none; }
+.rv-summary { display: grid; grid-template-columns: minmax(0, 1fr) 560px; gap: 8px; }
+.rv-left, .rv-right { display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow: auto; }
+#rv-clients, #rv-tickets, #rv-track { display: flex; flex-direction: column; }
+#rv-clients[hidden], #rv-tickets[hidden], #rv-track[hidden] { display: none; }
+.rv-chart-panel { flex: 0 0 auto; }
+#rv-chart { height: 380px; }
+#rv-pos { height: 170px; }
+.rv-controls { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; font-size: 12px; }
+.toggle { cursor: pointer; user-select: none; }
+.toggle input { vertical-align: -2px; margin-right: 6px; }
+.swatch { display: inline-block; width: 18px; height: 10px; margin: 0 4px 0 10px; vertical-align: 0; border-radius: 2px; }
+.swatch.truth { background: #f5f7fa; height: 2px; vertical-align: 3px; }
+.swatch.screen { background: #6b737c; height: 2px; vertical-align: 3px; }
+.swatch.runup { background: rgba(170, 170, 70, 0.35); }
+.swatch.move { background: rgba(140, 100, 220, 0.45); }
+.ring { color: var(--accent); margin: 0 3px 0 10px; }
+.hedge-sq { color: #c9ced4; margin: 0 3px 0 10px; }
+.disc-mark, .disc-line { color: #9aa3ad; }
+.oracle-mark, .oracle-line { color: #b48cff; }
+.you-line { color: var(--buy); }
+.rv-text { color: #c9ced4; line-height: 1.5; margin: 8px 0; }
+.rv-rules ul { margin: 6px 0 0; padding-left: 18px; }
+.rv-rules li { color: #c9ced4; line-height: 1.45; margin-bottom: 3px; font-size: 12px; }
+.rv-rules summary { cursor: pointer; }
+.switch { display: inline-flex; gap: 2px; }
+.switch .btn { padding: 2px 8px; font-size: 12px; }
+#rv-breakdown td:first-child { font-family: var(--sans); }
+#rv-breakdown tr.total td { font-weight: 700; border-top: 1px solid var(--line); }
+.moment { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; background: var(--panel-2); cursor: pointer; }
+.moment:hover { border-color: #3a4552; }
+.moment.active { border-color: var(--accent); }
+.moment-head { display: flex; justify-content: space-between; font-weight: 600; margin-bottom: 4px; }
+.moment p { margin: 0; color: #c9ced4; line-height: 1.45; }
+.rv-tip {
+  position: fixed; z-index: 50; pointer-events: none; max-width: 360px;
+  background: #0f1317; border: 1px solid #3a4552; border-radius: 8px; padding: 8px 10px; font: 12px var(--mono); color: var(--ink);
+  box-shadow: 0 8px 30px #000a;
+}
+.rv-tip[hidden] { display: none; }
+tr.current td { background: #1d2530; }

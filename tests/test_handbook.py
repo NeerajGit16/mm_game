@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from mm_game import game, handbook, host as host_module, market, world
+from mm_game import flow, game, handbook, host as host_module, market, world
 from mm_game.config import SESSION_PRESETS, GameConfig, ScoringConfig
 from mm_game.engine import Settings
 from mm_game.records import TrackRecord
@@ -116,12 +116,20 @@ def expected_market(config: GameConfig) -> dict[str, float | str]:
     # 100 lots, less at none, is exactly the configured widening.
     widening = config.competitor_half_spread_bp_at(100, math.inf) - config.competitor_half_spread_bp_at(0, math.inf)
     assert widening == pytest.approx(config.competitor_size_widen_bp)
+    # The informed size factor is the expected move over the reference, kept
+    # between the floor and the cap, as the flow draws it.
+    ref, lo, hi = config.informed_size_ref_bp, config.informed_size_factor_min, config.informed_size_factor_max
+    assert flow._size_factor(config, 2 * ref) == min(hi, max(lo, 2.0))
+    assert flow._size_factor(config, 0.0) == lo and flow._size_factor(config, 100 * ref) == hi
     rates = {p: SESSION_PRESETS[p].get("move_rate_per_free_hour", GameConfig.move_rate_per_free_hour) for p in SESSION_PRESETS}
     return {
         "hf": config.n_hedge_funds, "rm": config.n_real_money, "corp": config.n_corporates,
         "p_hf": config.informed_prob_hedge_fund, "p_rm": config.informed_prob_real_money,
         "p_corp": config.informed_prob_corporate,
         "accuracy": config.informed_accuracy, "noise": config.informed_signal_noise,
+        "ow_u": config.one_way_prob_uninformed, "ow_i": config.one_way_prob_informed,
+        "ref": config.informed_size_ref_bp,
+        "fmin": config.informed_size_factor_min, "fmax": config.informed_size_factor_max,
         "jmin": config.jump_size_min_bp, "jmax": config.jump_size_max_bp,
         **{f"p{k}": p for k, p in enumerate(config.event_count_probs)},
         "dmin": config.drift_magnitude_min_bp, "dmax": config.drift_magnitude_max_bp,
@@ -203,7 +211,7 @@ def test_every_part_3_number_is_the_config_value_it_describes(minutes):
     """Part 3 -- the exact numbers -- the same way: every number generated
     from this session's config, none typed."""
     config = GameConfig.for_session(minutes)
-    assert check_items(handbook.exact_numbers(config), expected_market(config)) >= 35
+    assert check_items(handbook.exact_numbers(config), expected_market(config)) >= 40
 
 
 def test_part_3_stays_out_of_the_handbook_until_10_scored_sessions():

@@ -76,7 +76,7 @@
           <div class="tiles">
             <div class="tile"><div class="lbl">Edge · client fills</div><div class="num tile-v" id="tile-edge"></div><div class="muted small" id="tile-edge-sub"></div></div>
             <div class="op">+</div>
-            <div class="tile"><div class="lbl">Venue charge · hedges</div><div class="num tile-v" id="tile-venue"></div><div class="muted small" id="tile-venue-sub"></div></div>
+            <div class="tile"><div class="lbl">Venue charge · hedges + close</div><div class="num tile-v" id="tile-venue"></div><div class="muted small" id="tile-venue-sub"></div></div>
             <div class="op">+</div>
             <div class="tile"><div class="lbl">Moves since the trade</div><div class="num tile-v" id="tile-move"></div><div class="muted small">what the market did to what you held</div></div>
             <div class="op">=</div>
@@ -258,11 +258,119 @@
   </div>
 </div>
 
-<div id="endscreen" class="cover" hidden>
-  <div class="card end">
-    <div class="end-head"><h1>Session over</h1><span class="muted small">Coaching record saved: <span id="end-saved" class="num"></span></span></div>
-    <div id="end-summary" class="md"></div>
-  </div>
+<!-- The reveal: after the session, from the coaching record alone. -->
+<div id="reveal" hidden>
+  <header class="rv-head">
+    <h1>Session over</h1>
+    <span id="rv-meta" class="lbl"></span>
+    <span id="rv-flag" class="flag" hidden>practice replay — not scored</span>
+    <span class="rv-saved"><span class="lbl">Coaching record saved</span> <span id="rv-saved" class="num"></span></span>
+  </header>
+  <nav id="rv-tabs" class="rv-tabs">
+    <button class="tab active" data-rtab="summary">Summary</button>
+    <button class="tab" data-rtab="clients">Clients</button>
+    <button class="tab" data-rtab="tickets">Tickets</button>
+    <button class="tab" data-rtab="track">Track record</button>
+  </nav>
+
+  <section class="rv-body rv-summary" id="rv-summary">
+    <div class="rv-left">
+      <div class="panel rv-chart-panel">
+        <div class="panel-head">
+          <span class="title">What really happened</span>
+          <span class="legend">
+            <span class="swatch truth"></span>true fair value <span class="swatch screen"></span>screen
+            <span class="swatch runup"></span>print run-up <span class="swatch move"></span>unannounced move (from the leak)
+            <span class="ring">○</span>fill with an informed client <span class="hedge-sq">■</span>hedge
+          </span>
+        </div>
+        <div class="rv-controls">
+          <label class="toggle"><input type="checkbox" id="rv-bots"> show the bots' fills
+            (<span class="disc-mark">▲</span> disciplined, <span class="oracle-mark">▲</span> flow oracle)</label>
+          <span class="muted small">drag to zoom · double-click to reset · hover a fill for its ticket</span>
+        </div>
+        <div id="rv-chart" class="chart-box"></div>
+      </div>
+      <div class="panel rv-pos-panel">
+        <div class="panel-head">
+          <span class="title">Position · you against the benchmarks</span>
+          <span class="legend"><span class="you-line">━</span> you <span class="disc-line">┅</span> disciplined bot <span class="oracle-line">━</span> flow oracle</span>
+        </div>
+        <div id="rv-pos" class="chart-box"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><span class="title">Clients, revealed</span><span class="muted small">full table in the Clients tab</span></div>
+        <table class="grid" id="rv-clients-top"><thead><tr>
+          <th>Client</th><th>True type</th><th>Knew about</th><th class="r">Lots with you</th><th class="r">Your net</th>
+          <th class="r">300s</th><th class="r">Next event</th>
+        </tr></thead><tbody></tbody></table>
+        <div id="rv-clients-more" class="muted small"></div>
+      </div>
+    </div>
+    <div class="rv-right">
+      <div class="panel">
+        <div class="panel-head"><span class="title">Score</span><span class="muted small">same world, same seed</span></div>
+        <table class="grid" id="rv-score"><thead><tr><th></th><th class="r">P&amp;L</th><th class="r">Risk-adj.</th></tr></thead><tbody></tbody></table>
+        <p id="rv-capture" class="rv-text"></p>
+        <details class="rv-rules" open>
+          <summary class="lbl">The benchmarks' rules</summary>
+          <ul id="rv-rules"></ul>
+        </details>
+      </div>
+      <div class="panel">
+        <div class="panel-head">
+          <span class="title">Where it came from</span>
+          <span class="switch" id="rv-horizons">
+            <button class="btn" data-horizon="60s">60s</button><button class="btn" data-horizon="300s">300s</button><button class="btn active" data-horizon="next_event">next event</button>
+          </span>
+        </div>
+        <table class="grid" id="rv-breakdown"><tbody></tbody></table>
+        <p class="muted small">Against true fair value; every line a signed contribution; the same numbers as summary.md.</p>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><span class="title">Three moments</span><span class="muted small">click to jump the chart there</span></div>
+        <div id="rv-moments"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="rv-body" id="rv-clients" hidden>
+    <div class="panel fill">
+      <div class="panel-head"><span class="title">Clients, revealed</span><span class="muted small">mark-outs are P&amp;L contributions from your fills with each client, against the truth</span></div>
+      <div class="scroll">
+        <table class="grid" id="rv-clients-table"><thead><tr>
+          <th>Client</th><th>Category</th><th>True type</th><th class="r">RFQs</th><th class="r">Quoted</th><th class="r">Won</th>
+          <th class="r">Lots</th><th class="r">Your net lots</th><th class="r">60s</th><th class="r">300s</th><th class="r">Next event</th><th>Knew about</th>
+        </tr></thead><tbody></tbody></table>
+      </div>
+    </div>
+  </section>
+
+  <section class="rv-body" id="rv-tickets" hidden>
+    <div class="panel fill">
+      <div class="panel-head"><span class="title">Tickets</span><span class="muted small">every RFQ: what you knew, what you did, what was true, what the flow oracle did</span></div>
+      <div class="scroll">
+        <table class="grid" id="rv-tickets-table"><thead><tr>
+          <th>Time</th><th class="r">RFQ</th><th>Client</th><th>Who it was</th><th class="r">Size</th><th>Type</th>
+          <th class="r">Your quote</th><th>Outcome</th><th class="r">60s</th><th class="r">300s</th><th class="r">Next event</th><th>Flow oracle</th>
+        </tr></thead><tbody></tbody></table>
+      </div>
+    </div>
+  </section>
+
+  <section class="rv-body" id="rv-track" hidden>
+    <div class="panel fill">
+      <div class="panel-head"><span class="title">Track record</span><span class="muted small">every session; practice replays shown, never counted</span></div>
+      <p id="rv-track-pooled" class="rv-text"></p>
+      <div class="scroll">
+        <table class="grid" id="rv-track-table"><thead><tr>
+          <th>Session</th><th class="r">Preset</th><th class="r">Seed</th><th class="r">P&amp;L</th><th class="r">Risk-adj.</th>
+          <th class="r">Disciplined</th><th class="r">Flow oracle</th><th class="r">Capture (P&amp;L)</th><th class="r">Capture (risk-adj.)</th><th>Status</th>
+        </tr></thead><tbody></tbody></table>
+      </div>
+    </div>
+  </section>
 </div>
+<div id="rv-tip" class="rv-tip" hidden></div>
 </body>
 </html>

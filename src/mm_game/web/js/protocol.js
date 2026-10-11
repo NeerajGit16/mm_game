@@ -188,11 +188,134 @@ export const V = 2;
  */
 
 /**
+ * A fill or hedge on the reveal, with who was on the other side.
+ * @typedef {Object} RevealFill
+ * @property {number} seq
+ * @property {number} step
+ * @property {"client" | "hedge" | "close"} source
+ * @property {number} quantity
+ * @property {number} price
+ * @property {number} edge_usd  quantity x (truth at the fill - price), in dollars
+ * @property {number} [rfq_ordinal]
+ * @property {number} [client_id]
+ * @property {"uninformed" | "informed_print" | "informed_move"} [fill_type]
+ * @property {{kind: string, index: number} | null} [informed_about]
+ * @property {number} [ticket_usd]  against the truth at the next event
+ */
+
+/** @typedef {{steps: number[], positions: number[]}} PositionPath */
+/** @typedef {{rfq_ordinal: number, bid: number | null, ask: number | null, outcome: string, quantity: number, price: number | null}} BotRfq */
+/** @typedef {{step: number, source: string, quantity: number, price: number, rfq_ordinal: number | null}} BotFill */
+
+/**
+ * @typedef {Object} Moment
+ * @property {"print" | "move" | "ticket"} kind
+ * @property {number} index
+ * @property {number} step
+ * @property {number} from_step
+ * @property {number} to_step
+ * @property {number} pnl_usd
+ * @property {string} title
+ * @property {string} sentence
+ */
+
+/** @typedef {{head: string | null, text: string}} RuleItem */
+
+/**
+ * @typedef {Object} RevealBlock
+ * @property {{every_steps: number, values: number[]}} truth
+ * @property {{steps: number[], mids: number[]}} screen
+ * @property {{index: number, step: number, jump_bp: number, runup: {start_step: number, end_step: number, total_bp: number} | null}[]} prints
+ * @property {{index: number, inform_step: number, start_step: number, end_step: number, size_bp: number}[]} moves
+ * @property {RevealFill[]} fills
+ * @property {{you: PositionPath, disciplined: PositionPath, oracle: PositionPath}} positions
+ * @property {{disciplined: {fills: BotFill[], rfqs: BotRfq[]}, oracle: {fills: BotFill[], rfqs: BotRfq[]}}} bots
+ * @property {Moment[]} moments
+ * @property {{disciplined: RuleItem[], oracle: RuleItem[]}} rules
+ */
+
+/**
+ * @typedef {Object} Horizon_
+ * @property {number} adverse_selection_usd
+ * @property {Record<string, number>} adverse_selection_by_type_usd
+ * @property {number} inventory_beyond_usd
+ * @property {number} fills_excluded
+ */
+
+/**
+ * @typedef {Object} ClientReveal
+ * @property {string} category
+ * @property {boolean} informed_type
+ * @property {number} rfqs
+ * @property {number} quoted
+ * @property {number} won
+ * @property {number} lots
+ * @property {number} net_lots
+ * @property {Record<string, number>} markouts_usd
+ * @property {{kind: string, index: number, signal_direction: number, actual_direction: number, right: boolean}[]} informed_about
+ */
+
+/**
+ * @typedef {Object} RfqLayer
+ * @property {number} ordinal
+ * @property {number} step
+ * @property {boolean} shown
+ * @property {{bid: number | null, ask: number | null, by: string} | null} action
+ * @property {{outcome: string, side: Side | null, price: number | null, cover: number | null, quantity: number} | null} outcome
+ * @property {{side: Side, informed: boolean, signal_bp: number | null, informed_about: {kind: string, index: number} | null,
+ *   markouts: Record<string, {pnl_bp: number | null, truncated?: boolean}> | null}} hidden
+ */
+
+/** @typedef {{ratio: number | null, oracle_minus_disciplined_usd: number}} CaptureLine */
+
+/**
+ * The coaching record, as far as the reveal reads it.
+ * @typedef {Object} CoachingRecord
+ * @property {number} format_version
+ * @property {{seed: number, config: Record<string, any>}} header
+ * @property {{preset: number | null}} settings
+ * @property {{replay_of_played_seed: boolean, ended_early_at_step: number | null}} flags
+ * @property {{pnl_usd: number, risk_adjusted_usd: number}} scores
+ * @property {Record<string, {scores: {pnl_usd: number, risk_adjusted_usd: number}}>} benchmarks
+ * @property {{min_gap_usd: number, pnl: CaptureLine, risk_adjusted: CaptureLine}} capture_ratio
+ * @property {{total_usd: number, spread_captured_usd: number, hedging_and_closing_usd: number, by_horizon: Record<string, Horizon_>}} decomposition
+ * @property {{clients: Record<string, ClientReveal>}} diagnostics
+ * @property {RfqLayer[]} rfqs
+ * @property {{clients: {client_id: number, category: string, informed_type: boolean}[]}} world
+ * @property {RevealBlock} reveal
+ */
+
+/**
  * The coaching record, once the session has ended.
  * @typedef {Object} RevealMsg
  * @property {number} v
  * @property {"reveal"} type
- * @property {Record<string, any>} record
+ * @property {CoachingRecord} record
+ */
+
+/**
+ * @typedef {Object} TrackEntry
+ * @property {string} session_id
+ * @property {number | null} preset
+ * @property {number} seed
+ * @property {boolean} replay_of_played_seed
+ * @property {number | null} ended_early_at_step
+ * @property {number} pnl_usd
+ * @property {number} risk_adjusted_usd
+ * @property {number} disciplined_pnl_usd
+ * @property {number} oracle_pnl_usd
+ * @property {number | null} capture_ratio_pnl
+ * @property {number | null} capture_ratio_risk_adjusted
+ */
+
+/**
+ * The track record, sent after the session: every session, and aggregates over scored ones.
+ * @typedef {Object} TrackMsg
+ * @property {number} v
+ * @property {"track"} type
+ * @property {TrackEntry[]} entries
+ * @property {{sessions: number, replays_excluded: number, pnl_usd: number | null, risk_adjusted_usd: number | null,
+ *   pooled_capture_ratio_pnl: number | null, pooled_capture_ratio_risk_adjusted: number | null}} aggregates
  */
 
 /**
@@ -204,7 +327,7 @@ export const V = 2;
  * @property {string} markdown
  */
 
-/** @typedef {EventMsg | StateMsg | DeskMsg | HostMsg | HandbookMsg | ErrorMsg | RevealMsg | SummaryMsg} ServerMessage */
+/** @typedef {EventMsg | StateMsg | DeskMsg | HostMsg | HandbookMsg | ErrorMsg | RevealMsg | SummaryMsg | TrackMsg} ServerMessage */
 
 /** @typedef {{v: number, type: string, [key: string]: any}} Action */
 

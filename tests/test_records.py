@@ -327,8 +327,8 @@ def test_only_the_storage_layer_touches_files():
         code = path.read_text(encoding="utf-8")
         hits = [m.group(0) for m in pattern.finditer(code)]
         allowed = {".write_text(", ".read_text("} if path.name in ("game.py", "records.py") else set()
-        if path.name == "server.py":  # it finds the front end's static files, never a record
-            allowed = {"from pathlib"}
+        if path.name == "server.py":  # it finds the front end's files; records it reads through storage
+            allowed = {"from pathlib", ".read_text("}
         assert set(hits) <= allowed, (path.name, hits)
         for line in code.splitlines():
             if ".write_text(" in line or ".read_text(" in line:

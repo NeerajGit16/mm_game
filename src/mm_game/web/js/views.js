@@ -8,7 +8,6 @@
 
 import { ago, bp, clock, escapeHtml, longCategory, mmss, price, shortCategory, signedInt, tone, usd } from "./format.js";
 import { quotePrices } from "./keys.js";
-import { renderMarkdown } from "./markdown.js";
 
 /** @typedef {import("./store.js").Store} Store */
 /** @typedef {import("./store.js").LiveStore} LiveStore */
@@ -384,13 +383,6 @@ function renderScreens(store) {
     $("start-handbook").innerHTML = html;
     $("handbook-body").innerHTML = html;
     renderedHandbook = store.handbook;
-  }
-  if (store.summary && $("endscreen").hidden) {
-    $("end-summary").innerHTML = renderMarkdown(store.summary.markdown);
-    set("end-saved", store.summary.saved_to);
-    $("endscreen").hidden = false;
-    $("sizebox").hidden = true;
-    $("handbookscreen").hidden = true;
   }
 }
 

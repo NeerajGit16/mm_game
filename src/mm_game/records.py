@@ -39,6 +39,8 @@ from typing import Any
 
 import numpy as np
 
+from mm_game import agents
+from mm_game import reveal as reveal_module
 from mm_game import rng as rng_module
 from mm_game import scoring as sc
 from mm_game.book import Source
@@ -52,7 +54,11 @@ from mm_game.world import World
 REPLAY_FORMAT = "mm_game.replay"
 RECORD_FORMAT = "mm_game.coaching_record"
 TRACK_FORMAT = "mm_game.track_record"
-FORMAT_VERSION = 1
+# Each file's layout has its own version. A bump adds a reader for the old
+# version to the tables below and a saved fixture; it never removes one.
+REPLAY_FORMAT_VERSION = 1
+RECORD_FORMAT_VERSION = 2  # 2: the reveal block, the protocol version
+TRACK_FORMAT_VERSION = 1
 
 
 class RecordError(ValueError):
@@ -106,7 +112,7 @@ def replay_file(
     return plain(
         {
             "format": REPLAY_FORMAT,
-            "format_version": FORMAT_VERSION,
+            "format_version": REPLAY_FORMAT_VERSION,
             "protocol_version": PROTOCOL_VERSION,
             "header": world.header,
             "settings": session.settings.to_record(),
@@ -190,8 +196,23 @@ def load_coaching_record(record: dict[str, Any]) -> dict[str, Any]:
     return reader(record)
 
 
+def _rebuild_format_1(record: dict[str, Any]) -> dict[str, Any]:
+    """Format 1 lacks the reveal block. It carries everything needed to
+    replay itself -- header, settings, both configs, flags, actions -- so it
+    is rebuilt in the current layout: the world regenerates from the
+    header, the actions re-apply, the bots re-run. Format-1 records were
+    written under protocol 2 (the stay-readable rule starts there), so the
+    actions are read as protocol 2."""
+    rf = _read_replay_format1_protocol2(
+        {k: record[k] for k in ("header", "settings", "scoring_config", "benchmark_config", "flags", "actions")}
+    )
+    session, world = replay(rf)
+    bots = {b: agents.run_bot(b, world, settings=rf.settings, scoring=rf.scoring, benchmark=rf.benchmark) for b in agents.BOTS}
+    return coaching_record(world, session, scoring=rf.scoring, benchmark=rf.benchmark, bots=bots, flags=rf.flags)
+
+
 # format version -> reader (or migration to the current layout). Add, never remove.
-_RECORD_READERS = {1: lambda record: record}
+_RECORD_READERS = {1: _rebuild_format_1, 2: lambda record: record}
 
 
 def drive(session: Session, actions: list[dict[str, Any]]) -> None:
@@ -429,7 +450,8 @@ def coaching_record(
     return plain(
         {
             "format": RECORD_FORMAT,
-            "format_version": FORMAT_VERSION,
+            "format_version": RECORD_FORMAT_VERSION,
+            "protocol_version": PROTOCOL_VERSION,
             "header": world.header,
             "settings": session.settings.to_record(),
             "scoring_config": scoring.to_record(),
@@ -451,6 +473,7 @@ def coaching_record(
             "events": session.log.to_record(),
             "hidden_layer": hidden_layer(world, session),
             "actions": session.actions,
+            "reveal": reveal_module.build(world, session, bots, benchmark=benchmark),
         }
     )
 
@@ -712,7 +735,7 @@ class TrackRecord:
 
     def save(self, storage) -> None:
         storage.write_text(
-            self.NAME, dumps({"format": TRACK_FORMAT, "format_version": FORMAT_VERSION, "entries": self.entries})
+            self.NAME, dumps({"format": TRACK_FORMAT, "format_version": TRACK_FORMAT_VERSION, "entries": self.entries})
         )
 
     def scored_sessions(self) -> int:
@@ -748,6 +771,12 @@ class TrackRecord:
         )
         self.entries.append(entry)
         return entry
+
+    def message(self, min_gap_usd: float) -> dict[str, Any]:
+        """The track record for the reveal's Track record tab: every session,
+        replays included and flagged, and the aggregates over scored ones."""
+        return {"v": PROTOCOL_VERSION, "type": "track", "entries": list(self.entries),
+                "aggregates": self.aggregates(min_gap_usd)}
 
     def aggregates(self, min_gap_usd: float) -> dict[str, Any]:
         """Over scored sessions only -- replays excluded: mean scores, and

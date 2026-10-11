@@ -23,7 +23,7 @@ from mm_game import agents, game
 from mm_game.config import CONFIG_SCHEMA_VERSION, BenchmarkConfig, GameConfig
 from mm_game.engine import Settings
 from mm_game.protocol import PROTOCOL_VERSION
-from mm_game.records import FORMAT_VERSION
+from mm_game.records import RECORD_FORMAT_VERSION, REPLAY_FORMAT_VERSION, TRACK_FORMAT_VERSION
 from mm_game.storage import DirectoryStorage
 
 FIXTURES = Path(__file__).resolve().parent / "records"
@@ -31,7 +31,12 @@ PRESET, SEED, QUIT_MINUTE = 30, 3, 25
 
 
 def current_name() -> str:
-    return f"protocol{PROTOCOL_VERSION}-format{FORMAT_VERSION}-config{CONFIG_SCHEMA_VERSION}"
+    """The directory for today's versions. (The first fixture, saved when all
+    three files shared one format version, is protocol2-format1-config2.)"""
+    return (
+        f"protocol{PROTOCOL_VERSION}-replay{REPLAY_FORMAT_VERSION}-record{RECORD_FORMAT_VERSION}"
+        f"-track{TRACK_FORMAT_VERSION}-config{CONFIG_SCHEMA_VERSION}"
+    )
 
 
 def main() -> None:

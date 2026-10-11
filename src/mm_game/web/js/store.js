@@ -38,6 +38,8 @@
  * @property {(Record<string, any> & {step: number}) | null} lastBlock
  * @property {{at: number, detail: string}[]} errors
  * @property {boolean} revealed
+ * @property {import("./protocol.js").CoachingRecord | null} record  the coaching record, after the end
+ * @property {import("./protocol.js").TrackMsg | null} track  the track record, after the end
  * @property {import("./protocol.js").SummaryMsg | null} summary
  * @property {number} version
  */
@@ -74,6 +76,8 @@ export function createStore() {
     lastBlock: null,
     errors: [],
     revealed: false,
+    record: null,
+    track: null,
     summary: null,
     version: 0,
   };
@@ -106,6 +110,10 @@ export function apply(store, msg) {
       break;
     case "reveal":
       store.revealed = true;
+      store.record = msg.record;
+      break;
+    case "track":
+      store.track = msg;
       break;
     case "summary":
       store.summary = msg;

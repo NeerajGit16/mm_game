@@ -14,10 +14,10 @@ What the engine deliberately does not own, and the front end must not:
   the public history so far and rebuilds from it.
 
 What leaves during play is exactly what the engine sends -- events,
-snapshots, errors -- plus the desk and a small ``host`` status message, both
-built from public messages only. The coaching record leaves once, in the
-``reveal`` message after the session has ended, followed by the markdown
-summary.
+snapshots, errors -- plus the desk, the handbook and a small
+``host`` status message, none of them built from anything hidden. The
+coaching record leaves once, in the ``reveal`` message after the session
+has ended, followed by the markdown summary and the track record.
 
 Inbound, actions pass through to the engine except ``advance``: the clock
 is the host's. One message of its own, ``begin``, starts the clock the
@@ -174,8 +174,10 @@ class Host:
                 "saved_to": f"{self.records_dir}/sessions/{self.game.session_id}/",
                 "markdown": records.markdown_summary(self.game.record),
             }
+            track = self.game.track.message(self.game.scoring.capture_ratio_min_usd)
             self._latest["summary"] = summary
-            batch.append(summary)
+            self._latest["track"] = track
+            batch += [summary, track]
         text = frame(batch)
         for send in list(self._sockets):
             send(text)
@@ -184,7 +186,7 @@ class Host:
         """A page connected: send it everything public so far."""
         self._sockets.append(send)
         latest = [self._latest[k] for k in ("state", "desk") if k in self._latest]
-        after = [self._latest[k] for k in ("reveal", "summary") if k in self._latest]
+        after = [self._latest[k] for k in ("reveal", "summary", "track") if k in self._latest]
         send(frame([*self._events, *latest, self._host_message(), self._handbook, *after]))
 
     def disconnect(self, send: Callable[[str], None]) -> None:

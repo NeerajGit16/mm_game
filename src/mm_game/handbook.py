@@ -21,7 +21,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
-from mm_game.config import SESSION_PRESETS, GameConfig, ScoringConfig
+from mm_game.config import SESSION_PRESETS, BenchmarkConfig, GameConfig, ScoringConfig
 from mm_game.fair_value import sigma_per_step
 from mm_game.protocol import PROTOCOL_VERSION
 from mm_game.scoring import diffusion_penalty_usd, print_penalty_usd
@@ -217,6 +217,20 @@ def exact_numbers(config: GameConfig) -> list[Item]:
             noise=_n(config.informed_signal_noise),
         ),
         _item(
+            "One-way RFQs",
+            "An uninformed client asks one-way {ow_u} of the time; an informed one, {ow_i}.",
+            ow_u=_pct(config.one_way_prob_uninformed),
+            ow_i=_pct(config.one_way_prob_informed),
+        ),
+        _item(
+            "Informed size",
+            "An informed client trades the usual size times its expected move over {ref}bp, kept between "
+            "{fmin}× and {fmax}×: the bigger the move it expects, the bigger the ticket.",
+            ref=_n(config.informed_size_ref_bp),
+            fmin=_n(config.informed_size_factor_min),
+            fmax=_n(config.informed_size_factor_max),
+        ),
+        _item(
             "Prints",
             "{jmin}–{jmax}bp, uniform, either sign equally. Prints in a session like this one: "
             + ", ".join(f"{_COUNT_WORDS[k]} {{p{k}}}" for k in range(len(probs)))
@@ -319,3 +333,74 @@ def message(config: GameConfig, scoring: ScoringConfig, *, scored_sessions: int)
             },
         ],
     }
+
+
+# --------------------------------------------------------------------------
+# The benchmark bots' rules, shown on every reveal
+# --------------------------------------------------------------------------
+
+
+def disciplined_rules(benchmark: BenchmarkConfig, config: GameConfig) -> list[Item]:
+    """The disciplined bot, rule by rule, from its config: what "good
+    habits on public information" means in numbers."""
+    widths = benchmark.disciplined_half_width_bp[: config.n_competitors + 1]
+    by_count = ", ".join(
+        ("{w0}bp with no other dealer in competition" if k == 0 else f"{{w{k}}}bp with {_COUNT_WORDS[k]}")
+        for k in range(len(widths))
+    )
+    into = "It quotes {pre}bp wider in the {pre_window} minutes before a print"
+    facts: dict[str, str] = {
+        "pre": _n(benchmark.disciplined_pre_print_widen_bp),
+        "pre_window": _n(benchmark.disciplined_pre_print_window_s / 60),
+        "lead": _n(benchmark.disciplined_hedge_lead_s / 60),
+        "carry": str(benchmark.disciplined_print_carry_lots),
+    }
+    if benchmark.disciplined_print_widen_bp > 0:
+        into += ", and {at_print}bp wider within {at_window} minutes of one"
+        facts.update(
+            at_print=_n(benchmark.disciplined_print_widen_bp),
+            at_window=_n(benchmark.disciplined_print_window_s / 60),
+        )
+    return [
+        _item(
+            "Quotes",
+            "Two prices around the screen: half-width " + by_count + ", plus {size}bp per {per} lots of size.",
+            **{f"w{k}": _n(w) for k, w in enumerate(widths)},
+            size=_n(benchmark.disciplined_size_widen_bp),
+            per=str(IMPACT_PER_LOTS),
+        ),
+        _item("Into prints", into + "; {lead} minutes before each print it hedges down to ±{carry} lots.", **facts),
+        _item(
+            "Skew",
+            "It moves its mid {skew}bp per {per} lots against its position.",
+            skew=_n(benchmark.disciplined_skew_bp_per_100_lots),
+            per=str(IMPACT_PER_LOTS),
+        ),
+        _item(
+            "Inventory",
+            "Whenever a fill takes it past ±{cap} lots, it hedges straight back to ±{target}.",
+            cap=str(benchmark.disciplined_inventory_cap_lots),
+            target=str(benchmark.disciplined_inventory_target_lots),
+        ),
+        _item(
+            "The close",
+            "It stops quoting and goes flat {close} minutes before the end.",
+            close=_n(benchmark.disciplined_close_lead_s / 60),
+        ),
+        Item("What it knows", "Only what you see: the screen, the calendar, the ticket. It never knows which "
+                              "clients are informed."),
+    ]
+
+
+def oracle_rules(benchmark: BenchmarkConfig) -> list[Item]:
+    return [
+        _item(
+            "The flow oracle",
+            "is the disciplined bot told which RFQs are informed — not about what, not which way. It quotes them "
+            "{widen}bp wider, and once it learns an informed client's side it leans its mid {lean}bp that way for "
+            "{lean_min} minutes; it drops the run-up widening, and its hedges are the disciplined bot's.",
+            widen=_n(benchmark.oracle_informed_widen_bp),
+            lean=_n(benchmark.oracle_lean_bp),
+            lean_min=_n(benchmark.oracle_lean_s / 60),
+        )
+    ]

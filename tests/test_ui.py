@@ -30,23 +30,6 @@ PRESET, SEED = 60, 7
 TICK = 0.25
 
 
-def launch(p):
-    for kwargs in ({"channel": "msedge"}, {"channel": "chrome"}, {}):
-        try:
-            return p.chromium.launch(headless=True, **kwargs)
-        except Exception:
-            continue
-    pytest.skip("no browser for Playwright: install Edge or Chrome, or run `playwright install chromium`")
-
-
-@pytest.fixture(scope="module")
-def browser():
-    with sync_api.sync_playwright() as p:
-        b = launch(p)
-        yield b
-        b.close()
-
-
 @dataclass
 class Play:
     page: object
@@ -242,19 +225,22 @@ def test_hedge_keys_trade_their_sizes_and_f_twice_flattens(play):
     assert play.events("hedge_executed")[-1].data["requested"] == -25
 
 
-def test_the_end_screen_shows_the_summary(play):
-    """Quit (confirmed) ends the session; the end screen shows summary.md
-    as written for the coaching record, and where the record was saved."""
+def test_the_reveal_takes_the_page_when_the_session_ends(play):
+    """Quit (confirmed) ends the session; the desk gives way to the reveal,
+    drawn from the coaching record the server sent after the end: the seed
+    (shown for the first time), your score as the record has it, the
+    track record, and where the record was saved."""
     play.page.on("dialog", lambda d: d.accept())
     play.press("Space")
     play.page.click("#quit-btn")
-    play.wait("!document.getElementById('endscreen').hidden")
-    summary = records.markdown_summary(play.host.game.record)
-    title = summary.splitlines()[0].removeprefix("# ")
-    assert play.js("document.querySelector('#end-summary h1').textContent") == title
-    tables = play.js("document.querySelectorAll('#end-summary table').length")
-    assert tables == sum(1 for i, l in enumerate(summary.splitlines()) if l.startswith("|---"))
-    assert play.js("document.getElementById('end-saved').textContent").endswith(f"sessions/{play.host.game.session_id}/")
+    play.wait("!document.getElementById('reveal').hidden")
+    assert play.js("document.getElementById('app').hidden") is True
+    record = play.host.game.record
+    assert f"seed {record['header']['seed']}" in play.js("document.getElementById('rv-meta').textContent")
+    you = play.js("document.querySelector('#rv-score tbody tr').children[1].textContent")
+    assert float(you.replace("−", "-").replace("$", "").replace(",", "")) == round(record["scores"]["pnl_usd"])
+    assert play.js("window.mmReveal.track.entries.length") == 1
+    assert play.js("document.getElementById('rv-saved').textContent").endswith(f"sessions/{play.host.game.session_id}/")
 
 
 # --------------------------------------------------------------------------

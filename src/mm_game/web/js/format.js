@@ -88,3 +88,37 @@ export function escapeHtml(s) {
 export const shortCategory = (category) => (CATEGORY[category] || [category])[0];
 /** @param {string} category */
 export const longCategory = (category) => (CATEGORY[category] || [category, category])[1];
+
+/**
+ * Round half to even, as Python's format does: the reveal's dollars must be
+ * the same numbers as summary.md's.
+ * @param {number} x  a non-negative number
+ */
+export function halfEven(x) {
+  const f = Math.floor(x);
+  const d = x - f;
+  if (d > 0.5) return f + 1;
+  if (d < 0.5) return f;
+  return f % 2 === 0 ? f : f + 1;
+}
+
+/**
+ * Dollars as summary.md writes them: whole, halves to even; signed (+$/−$)
+ * for P&L contributions, or with a minus only.
+ * @param {number} x
+ * @param {boolean} [signed]
+ */
+export function money(x, signed = true) {
+  const negative = x < -0.5;
+  const body = "$" + halfEven(Math.abs(x)).toLocaleString("en-US");
+  if (negative) return MINUS + body;
+  return signed ? "+" + body : body;
+}
+
+/**
+ * A ratio as a percentage, or n/a.
+ * @param {number | null | undefined} r
+ */
+export function percent(r) {
+  return r === null || r === undefined ? "n/a" : `${Math.round(r * 100)}%`;
+}
