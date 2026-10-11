@@ -35,7 +35,7 @@ import math
 import time
 from typing import Any, Callable, Protocol
 
-from mm_game import protocol, records
+from mm_game import handbook, protocol, records
 from mm_game.desk import Desk
 from mm_game.engine import Session
 from mm_game.game import Game
@@ -105,6 +105,9 @@ class Host:
         self._events: list[dict[str, Any]] = []  # every event sent: the public history
         self._latest: dict[str, dict[str, Any]] = {}  # last state, desk, reveal, summary
         self._desk_sent: str | None = None
+        self._handbook = handbook.message(
+            game.session.config, game.scoring, scored_sessions=game.track.scored_sessions()
+        )
         self._publish(game.start())
 
     @property
@@ -182,7 +185,7 @@ class Host:
         self._sockets.append(send)
         latest = [self._latest[k] for k in ("state", "desk") if k in self._latest]
         after = [self._latest[k] for k in ("reveal", "summary") if k in self._latest]
-        send(frame([*self._events, *latest, self._host_message(), *after]))
+        send(frame([*self._events, *latest, self._host_message(), self._handbook, *after]))
 
     def disconnect(self, send: Callable[[str], None]) -> None:
         if send in self._sockets:

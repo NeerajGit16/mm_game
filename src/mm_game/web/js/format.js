@@ -1,35 +1,47 @@
+// @ts-check
 // Display formatting. Prices travel in bp (9550.25) and show as 95.5025.
 
 export const MINUS = "−";
 
+/** @type {Record<string, [string, string]>} */
 export const CATEGORY = {
   hedge_fund: ["HF", "Hedge fund"],
   real_money: ["RM", "Real money"],
   corporate: ["Corp", "Corporate"],
 };
 
+/** @param {number} n */
 const pad = (n) => String(n).padStart(2, "0");
 
+/** @param {number | null | undefined} bp */
 export function price(bp) {
   return bp === null || bp === undefined ? "—" : (bp / 100).toFixed(4);
 }
 
+/** @param {number} seconds */
 export function clock(seconds) {
   const s = Math.max(0, Math.floor(seconds + 1e-9));
   return `${pad(Math.floor(s / 3600))}:${pad(Math.floor((s % 3600) / 60))}:${pad(s % 60)}`;
 }
 
+/** @param {number} seconds */
 export function mmss(seconds) {
   const s = Math.max(0, Math.floor(seconds + 1e-9));
   return `${pad(Math.floor(s / 60))}:${pad(s % 60)}`;
 }
 
+/** @param {number} n */
 export function signedInt(n) {
   if (n > 0) return `+${n}`;
   if (n < 0) return `${MINUS}${-n}`;
   return "0";
 }
 
+/**
+ * Dollars, whole, signed unless asked not to: +$3,240, −$500, $0.
+ * @param {number} x
+ * @param {boolean} [signed]
+ */
 export function usd(x, signed = true) {
   const a = Math.round(Math.abs(x));
   const body = "$" + a.toLocaleString("en-US");
@@ -37,6 +49,11 @@ export function usd(x, signed = true) {
   return (x < 0 ? MINUS : "+") + body;
 }
 
+/**
+ * Basis points, signed: +0.6bp, −1.1bp; — when there is nothing yet.
+ * @param {number | null | undefined} x
+ * @param {number} [digits]
+ */
 export function bp(x, digits = 1) {
   if (x === null || x === undefined) return "—";
   const r = Number(x.toFixed(digits));
@@ -44,16 +61,30 @@ export function bp(x, digits = 1) {
   return (r > 0 ? "+" : MINUS) + Math.abs(r).toFixed(digits) + "bp";
 }
 
+/**
+ * The CSS class for a signed number: pos, neg or nothing.
+ * @param {number | null | undefined} x
+ */
 export function tone(x) {
   if (x === null || x === undefined || Math.abs(x) < 1e-9) return "";
   return x > 0 ? "pos" : "neg";
 }
 
+/** @param {number} seconds */
 export function ago(seconds) {
   if (seconds < 60) return `${Math.floor(seconds)} s ago`;
   return `${Math.floor(seconds / 60)} min ago`;
 }
 
+/** @param {unknown} s */
 export function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+  return String(s).replace(
+    /[&<>"']/g,
+    (c) => /** @type {Record<string, string>} */ ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
+  );
 }
+
+/** @param {string} category */
+export const shortCategory = (category) => (CATEGORY[category] || [category])[0];
+/** @param {string} category */
+export const longCategory = (category) => (CATEGORY[category] || [category, category])[1];

@@ -1,3 +1,4 @@
+// @ts-check
 // Quote and hedge entry. A quote is a skew and a half-width around the
 // screen, in whole ticks; both are sticky, so each new ticket starts from
 // the last market you made and Enter alone sends it again. Nothing here
@@ -7,19 +8,43 @@
 
 import * as P from "./protocol.js";
 
+/** @typedef {import("./store.js").Store} Store */
+/** @typedef {import("./protocol.js").Ticket} Ticket */
+
+/**
+ * What the page does when an action changes something on screen.
+ * @typedef {Object} Ui
+ * @property {() => void} changed
+ * @property {(text: string | null, ms?: number) => void} hint
+ * @property {(box: {text: string} | null) => void} box
+ * @property {(open: boolean) => void} handbook
+ * @property {() => void} cycleTab
+ */
+
+/** @type {Record<string, number>} */
 export const HEDGE_KEYS = { q: 10, w: 25, e: 50, a: -10, s: -25, d: -50 };
 export const DEFAULT_HALF_WIDTH = 2;
 const FLATTEN_WINDOW_MS = 1000;
 const MAX_BOX_DIGITS = 3;
 // Keys that act once per press: holding them must not repeat a trade.
-const NO_REPEAT = new Set(["Enter", "p", "0", "h", "f", " ", "Tab", "1", "2", "4", ...Object.keys(HEDGE_KEYS)]);
+const NO_REPEAT = new Set(["Enter", "p", "0", "h", "f", " ", "Tab", "?", "1", "2", "4", ...Object.keys(HEDGE_KEYS)]);
 
-// The two prices a skew and half-width make around the screen. On a
-// one-way ticket only the side the client asked for is sent: a client who
-// buys lifts your ask, so the bid goes as null.
+/**
+ * The two prices a skew and half-width make around the screen. On a
+ * one-way ticket only the side the client asked for is sent: a client who
+ * buys lifts your ask, so the bid goes as null.
+ * @param {number} mid
+ * @param {number} skew
+ * @param {number} halfWidth
+ * @param {number} tick
+ * @param {Ticket | null} ticket
+ * @returns {{bid: number | null, ask: number | null}}
+ */
 export function quotePrices(mid, skew, halfWidth, tick, ticket) {
   const centre = mid + skew * tick;
+  /** @type {number | null} */
   let bid = centre - halfWidth * tick;
+  /** @type {number | null} */
   let ask = centre + halfWidth * tick;
   if (ticket && ticket.one_way) {
     if (ticket.side === 1) bid = null;
@@ -28,25 +53,32 @@ export function quotePrices(mid, skew, halfWidth, tick, ticket) {
   return { bid, ask };
 }
 
+/**
+ * @param {{store: Store, send: (message: P.Action) => void, ui: Ui, now?: () => number}} deps
+ */
 export function createControls({ store, send, ui, now = () => performance.now() }) {
-  const c = { skew: 0, halfWidth: DEFAULT_HALF_WIDTH, box: null, lastF: -Infinity };
+  /** @type {{skew: number, halfWidth: number, box: {text: string} | null, lastF: number, handbook: boolean}} */
+  const c = { skew: 0, halfWidth: DEFAULT_HALF_WIDTH, box: null, lastF: -Infinity, handbook: false };
   const ticket = () => (store.state ? store.state.ticket : null);
   const live = () => !!store.state && store.state.status === "live";
 
   const actions = {
+    /** @param {number} d */
     skew(d) { c.skew += d; ui.changed(); },
     resetSkew() { c.skew = 0; ui.changed(); },
+    /** @param {number} d */
     width(d) { c.halfWidth = Math.max(1, c.halfWidth + d); ui.changed(); },
     send() {
-      const t = ticket();
-      if (!t) return;
-      const { bid, ask } = quotePrices(store.state.screen.mid, c.skew, c.halfWidth, store.tick, t);
-      send(P.quote(t.ordinal, bid, ask));
+      const st = store.state;
+      if (!st || !st.ticket) return;
+      const { bid, ask } = quotePrices(st.screen.mid, c.skew, c.halfWidth, store.tick, st.ticket);
+      send(P.quote(st.ticket.ordinal, bid, ask));
     },
     pass() {
       const t = ticket();
       if (t) send(P.pass(t.ordinal));
     },
+    /** @param {number} quantity */
     hedge(quantity) {
       if (quantity && live()) send(P.hedge(quantity));
     },
@@ -63,12 +95,14 @@ export function createControls({ store, send, ui, now = () => performance.now() 
       }
     },
     openBox() { c.box = { text: "" }; ui.box(c.box); },
+    /** @param {string} digit */
     boxDigit(digit) {
       if (c.box && c.box.text.length < MAX_BOX_DIGITS) { c.box.text += digit; ui.box(c.box); }
     },
     boxBack() {
       if (c.box) { c.box.text = c.box.text.slice(0, -1); ui.box(c.box); }
     },
+    /** @param {number} sign */
     boxTrade(sign) {
       if (!c.box) return;
       const size = parseInt(c.box.text || "0", 10);
@@ -79,14 +113,27 @@ export function createControls({ store, send, ui, now = () => performance.now() 
     boxCancel() { c.box = null; ui.box(null); },
     togglePause() {
       if (!store.begun) { send(P.begin()); return; }
-      if (!live()) return;
-      send(store.state.clock.paused ? P.resume() : P.pause());
+      const st = store.state;
+      if (!st || st.status !== "live") return;
+      send(st.clock.paused ? P.resume() : P.pause());
     },
+    // The handbook pauses the clock and leaves it paused when it closes:
+    // you resume with Space when you are ready, not when a window shuts.
+    toggleHandbook() {
+      if (c.handbook) { c.handbook = false; ui.handbook(false); return; }
+      if (!store.begun || store.summary) return; // the start screen already shows it
+      c.handbook = true;
+      ui.handbook(true);
+      const st = store.state;
+      if (st && st.status === "live" && !st.clock.paused) send(P.pause());
+    },
+    /** @param {number} n */
     speed(n) { if (live()) send(P.setSpeed(n)); },
     cycleTab() { ui.cycleTab(); },
     quit() { if (live()) send(P.quit()); },
   };
 
+  /** @param {KeyboardEvent} e */
   function onKey(e) {
     if (e.ctrlKey || e.metaKey || e.altKey) return false;
     if (store.summary) return false; // the session is over
@@ -102,6 +149,11 @@ export function createControls({ store, send, ui, now = () => performance.now() 
       else if (key === "Escape") actions.boxCancel();
       return true;
     }
+    // While the handbook is open, nothing trades.
+    if (c.handbook) {
+      if ((key === "?" || key === "Escape") && !e.repeat) actions.toggleHandbook();
+      return true;
+    }
     if (e.repeat && NO_REPEAT.has(key)) return true;
 
     if (key === "ArrowLeft") actions.skew(-1);
@@ -115,6 +167,7 @@ export function createControls({ store, send, ui, now = () => performance.now() 
     else if (key === "h") actions.openBox();
     else if (key === "f") actions.flattenPress();
     else if (key === " ") actions.togglePause();
+    else if (key === "?") actions.toggleHandbook();
     else if (key === "1" || key === "2" || key === "4") actions.speed(Number(key));
     else if (key === "Tab") actions.cycleTab();
     else return false;
@@ -123,3 +176,5 @@ export function createControls({ store, send, ui, now = () => performance.now() 
 
   return { state: c, actions, onKey };
 }
+
+/** @typedef {ReturnType<typeof createControls>} Controls */

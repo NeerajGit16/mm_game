@@ -189,3 +189,33 @@ table.grid tr.highlight td { background: #1d2530; }
 .md th:first-child, .md td:first-child { text-align: left; }
 .md th { color: var(--muted); font-weight: 600; }
 .md ul { margin: 4px 0 8px; padding-left: 20px; }
+
+/* -- P&L tab ------------------------------------------------------------- */
+.tiles { display: flex; align-items: stretch; gap: 8px; }
+.tile { flex: 1; border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; background: var(--panel-2); }
+.tile.total { border-color: #3a4552; }
+.tile-v { font-size: 22px; font-weight: 600; margin: 2px 0; }
+.op { align-self: center; color: var(--muted); font-size: 18px; }
+.pnl-charts { flex: 2; }
+.chart-box { flex: 2; min-height: 0; position: relative; }
+.chart-box.short { flex: 1; }
+.pnl-table-panel { flex: 3; }
+table.grid tfoot td { position: sticky; bottom: 0; background: var(--panel); border-top: 1px solid var(--line); font-weight: 600; }
+table.sortable th[data-sort] { cursor: pointer; }
+table.sortable th.sorted { color: var(--ink); }
+.panel.fill { flex: 1; }
+
+/* -- Calendar & log ------------------------------------------------------- */
+.calendar-panel { flex: 0 0 auto; }
+.filters { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+.filters label { border: 1px solid var(--line); border-radius: 6px; padding: 2px 8px; font-size: 12px; cursor: pointer; user-select: none; }
+.filters input { margin: 0 4px 0 0; vertical-align: -1px; }
+#log-table td:last-child { white-space: normal; }
+
+/* -- the handbook ------------------------------------------------------------ */
+.card.start { max-width: 920px; max-height: 92vh; overflow: auto; }
+.handbook h2 { font-size: 15px; margin: 18px 0 6px; color: var(--accent); }
+.handbook h2 .muted { font-weight: 400; font-size: 12px; margin-left: 6px; }
+.handbook ul { margin: 4px 0 6px; padding-left: 20px; }
+.handbook li { line-height: 1.5; color: #c9ced4; margin-bottom: 3px; }
+.handbook .locked { color: var(--accent); border: 1px dashed var(--accent); border-radius: 8px; padding: 8px 12px; display: inline-block; }

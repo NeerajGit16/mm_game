@@ -15,6 +15,16 @@ moved your way after you traded. It becomes available once the clock has
 passed t + h. Per lot is the sum over a client's matured fills divided by
 their lots. The edge you charged is deliberately left out: a client you
 quote wide can still be the one the market moves against you after.
+
+P&L is against the screen too: every trade, hedges and the close included,
+marked to the screen showing now -- the snapshot's, as the top bar marks
+it. A trade of q lots at price p, when the screen read s, splits exactly
+into its **edge** q x (s - p) -- what you charged a client, or paid the
+venue -- and its **move since** q x (screen now - s), what the market did
+to it. It is a linear product, so the rows add up to the book's P&L with no
+matching of buys to sells. A venue trade's screen is read off its own fill
+(price less the side times the per-lot cost), which also covers the close
+after a quit, when no screen readings are shown in between.
 """
 
 from __future__ import annotations
@@ -44,6 +54,14 @@ class Desk:
         self._rows: dict[int, dict[str, Any]] = {}  # by RFQ ordinal, in arrival order
         self._clients: dict[int, dict[str, Any]] = {}
         self._fills: list[dict[str, Any]] = []  # client fills: step, client, quantity
+        self._usd_per_bp: float | None = None
+        self._trades: list[dict[str, Any]] = []  # every trade: the P&L rows before marking
+        self._position = 0
+        self._cash_bp = 0.0  # minus the sum of quantity x price, relative to the start level
+        self._level = 0.0
+        self._series: dict[str, list] = {"step": [], "pnl_usd": [], "position": []}
+        self._book: dict[str, float] = {"realised_usd": 0.0, "unrealised_usd": 0.0}
+        self._now_mid: float | None = None  # the latest snapshot's screen
 
     # -- input ----------------------------------------------------------------
 
@@ -53,10 +71,14 @@ class Desk:
             self.step = max(self.step, message["step"])
         elif message.get("type") == "state":
             self.step = message["step"]
+            self._book = {k: message["book"][k] for k in ("realised_usd", "unrealised_usd")}
+            self._now_mid = message["screen"]["mid"]
 
     def _event(self, kind: str, step: int, d: dict[str, Any]) -> None:
         if kind == "session_start":
             self.dt = d["config"]["dt"]
+            self._usd_per_bp = d["config"]["tick_value"] / d["config"]["tick_size"]
+            self._level = d["config"]["start_level"]
             for c in d["roster"]:
                 self._clients[c["client_id"]] = {
                     "client_id": c["client_id"],
@@ -71,6 +93,7 @@ class Desk:
         elif kind == "screen_update":
             self._screen_steps.append(step)
             self._screen_mids.append(d["mid"])
+            self._mark(step, d["mid"])
         elif kind == "rfq_arrived":
             r = d["rfq"]
             self._rows[r["ordinal"]] = {
@@ -117,6 +140,36 @@ class Desk:
                 client["net"] += d["quantity"]
                 client["last_trade_step"] = step
                 self._fills.append({"step": step, "client_id": row["client_id"], "quantity": d["quantity"]})
+                self._trade(step, "client", d["quantity"], d["price"], row, self._screen_at(step))
+        elif kind in ("hedge_executed", "close_liquidation") and d["quantity"]:
+            screen = d["price"] - (1 if d["quantity"] > 0 else -1) * d["cost_bp_per_lot"]
+            self._trade(step, "hedge" if kind == "hedge_executed" else "close", d["quantity"], d["price"], None, screen)
+
+    def _trade(
+        self, step: int, kind: str, quantity: int, price: float, row: dict[str, Any] | None, screen: float
+    ) -> None:
+        self._trades.append(
+            {
+                "step": step,
+                "kind": kind,
+                "ordinal": None if row is None else row["ordinal"],
+                "client_id": None if row is None else row["client_id"],
+                "category": None if row is None else row["category"],
+                "quantity": quantity,
+                "price": price,
+                "screen_then": screen,
+            }
+        )
+        self._position += quantity
+        self._cash_bp -= quantity * (price - self._level)
+        self._mark(step, screen)
+
+    def _mark(self, step: int, screen: float) -> None:
+        """A point on the P&L chart: everything held, at the screen then."""
+        pnl_bp = self._cash_bp + self._position * (screen - self._level)
+        self._series["step"].append(step)
+        self._series["pnl_usd"].append(pnl_bp * self._usd_per_bp)
+        self._series["position"].append(self._position)
 
     # -- derived --------------------------------------------------------------
 
@@ -171,15 +224,49 @@ class Desk:
             )
         return out
 
+    def _pnl(self) -> dict[str, Any]:
+        """Every trade marked to the screen now, the tiles they add up to,
+        and the P&L and position through the session."""
+        usd = self._usd_per_bp
+        now = self._now_mid if self._now_mid is not None else self._screen_at(self.step)
+        rows = []
+        for i, t in enumerate(self._trades):
+            edge = t["quantity"] * (t["screen_then"] - t["price"]) * usd
+            move = t["quantity"] * (now - t["screen_then"]) * usd
+            rows.append({"seq": i, **t, "edge_usd": edge, "move_usd": move, "total_usd": edge + move})
+        edge_client = sum(r["edge_usd"] for r in rows if r["kind"] == "client")
+        venue = sum(r["edge_usd"] for r in rows if r["kind"] != "client")
+        move = sum(r["move_usd"] for r in rows)
+        return {
+            "rows": rows,
+            "tiles": {
+                "edge_client_usd": edge_client,
+                "venue_charge_usd": venue,
+                "move_usd": move,
+                "total_usd": edge_client + venue + move,
+                **self._book,
+            },
+            "series": {k: list(v) for k, v in self._series.items()},
+        }
+
     def message(self) -> dict[str, Any]:
         clients = []
         for cid, c in self._clients.items():
             per_lot, lots = self._client_markouts(cid)
-            clients.append({**c, "markout_bp_per_lot": per_lot, "markout_lots": lots, "recent": self._recent(cid)})
+            clients.append(
+                {
+                    **c,
+                    "hit_rate": c["traded"] / c["quoted"] if c["quoted"] else None,
+                    "markout_bp_per_lot": per_lot,
+                    "markout_lots": lots,
+                    "recent": self._recent(cid),
+                }
+            )
         return {
             "v": PROTOCOL_VERSION,
             "type": "desk",
             "step": self.step,
             "blotter": [dict(r) for r in reversed(self._rows.values())],
             "clients": clients,
+            "pnl": self._pnl(),
         }

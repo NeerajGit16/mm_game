@@ -23,7 +23,7 @@ from mm_game.book import Source
 from mm_game.config import BenchmarkConfig, GameConfig
 from mm_game.engine import Settings
 from mm_game.events import FIELDS, Kind
-from mm_game.storage import MemoryStorage
+from mm_game.storage import DirectoryStorage, MemoryStorage
 from test_engine import HIDDEN_NAMES, keys_in
 from wire import LoopThread, ManualClock, Wire, WireSession, serve
 
@@ -78,13 +78,25 @@ DESK = {
         "learned": LEARNED,
     }],
     "clients": [{
-        **{k: LEAF for k in ("client_id", "category", "rfqs", "quoted", "traded", "lots", "net", "last_trade_step")},
+        **{k: LEAF for k in ("client_id", "category", "rfqs", "quoted", "traded", "lots", "net", "last_trade_step",
+                             "hit_rate")},
         "markout_bp_per_lot": HORIZONS, "markout_lots": HORIZONS,
         "recent": [{**{k: LEAF for k in ("ordinal", "step", "size", "outcome", "quantity", "level", "client_side")},
                     "markout_bp_per_lot": HORIZONS}],
     }],
+    "pnl": {
+        "rows": [{k: LEAF for k in ("seq", "step", "kind", "ordinal", "client_id", "category", "quantity", "price",
+                                    "screen_then", "edge_usd", "move_usd", "total_usd")}],
+        "tiles": {k: LEAF for k in ("edge_client_usd", "venue_charge_usd", "move_usd", "total_usd", "realised_usd",
+                                    "unrealised_usd")},
+        "series": {"step": [LEAF], "pnl_usd": [LEAF], "position": [LEAF]},
+    },
 }
 HOST = {"v": LEAF, "type": LEAF, "begun": LEAF}
+HANDBOOK = {
+    "v": LEAF, "type": LEAF, "scored_sessions": LEAF, "unlock_after": LEAF,
+    "parts": [{"title": LEAF, "subtitle": LEAF, "note": LEAF, "items": [{"head": LEAF, "text": LEAF}]}],
+}
 ERROR = {"v": LEAF, "type": LEAF, "step": LEAF, "detail": LEAF}
 
 
@@ -120,7 +132,7 @@ def check_message(m: dict) -> None:
             for c in m["data"]["roster"]:
                 assert set(c) == {"client_id", "category"}
     else:
-        conforms(m, {"state": STATE, "desk": DESK, "host": HOST, "error": ERROR}[t])
+        conforms(m, {"state": STATE, "desk": DESK, "host": HOST, "handbook": HANDBOOK, "error": ERROR}[t])
 
 
 def hidden_values(w: world.World) -> set[float]:
@@ -155,7 +167,7 @@ def assert_nothing_hidden(w: world.World, wire: Wire) -> list[dict]:
     end = next(i for i, m in enumerate(msgs) if m.get("kind") == "session_end")
     assert reveals[0] > end
     play = msgs[: reveals[0]]
-    assert {m["type"] for m in play} <= {"event", "state", "error", "desk", "host"}
+    assert {m["type"] for m in play} <= {"event", "state", "error", "desk", "host", "handbook"}
     for m in play:
         check_message(m)
     assert not keys_in(play) & HIDDEN_NAMES, keys_in(play) & HIDDEN_NAMES
@@ -268,7 +280,7 @@ def test_no_hidden_field_crosses_the_wire_during_play(lt):
     play = assert_nothing_hidden(host.game._world, wire)
     kinds = {m["kind"] for m in play if m["type"] == "event"}
     assert kinds == {k.value for k in Kind}, {k.value for k in Kind} - kinds
-    assert {m["type"] for m in play} == {"event", "state", "error", "desk", "host"}
+    assert {m["type"] for m in play} == {"event", "state", "error", "desk", "host", "handbook"}
     assert any(m["type"] == "summary" for m in wire.messages())
 
 
@@ -381,8 +393,9 @@ def test_a_page_that_reconnects_gets_the_public_history(lt):
     history = again.first
     assert [m for m in history if m["type"] == "event"] == events
     latest = {m["type"]: m for m in wire.messages()}
-    assert [m["type"] for m in history if m["type"] != "event"] == ["state", "desk", "host"]
-    assert history[-3] == latest["state"] and history[-2] == latest["desk"] and history[-1]["begun"] is True
+    assert [m["type"] for m in history if m["type"] != "event"] == ["state", "desk", "host", "handbook"]
+    assert history[-4] == latest["state"] and history[-3] == latest["desk"] and history[-2]["begun"] is True
+    assert history[-1] == next(m for m in wire.first if m["type"] == "handbook")
 
 
 # --------------------------------------------------------------------------
@@ -547,3 +560,95 @@ def test_the_snapshot_prices_the_venue_as_a_hedge_pays():
             fill = s.handle(agents.hedge(size))
             executed = next(m for m in fill if m.get("kind") == "hedge_executed")["data"]
             assert executed["cost_bp_per_lot"] == quoted[size] and executed["quantity"] == size
+
+
+@pytest.mark.parametrize("preset,seed,quit_minute", [(30, 3, 20), (60, 7, None), (120, 9, None)])
+def test_pnl_rows_add_up_to_the_top_bar_pnl_at_every_step(preset, seed, quit_minute):
+    """After every snapshot the page receives, the P&L tab's rows -- every
+    trade, hedges and the close included, each marked to the screen showing
+    now -- add up to the top bar's P&L to the cent; each row's edge and
+    move since are q x (screen then - price) and q x (screen now - screen
+    then), recomputed from the public screen; the tiles and the footer
+    they make agree with the rows; and the P&L chart's series, point by
+    point, is everything held marked at the screen then. A row left out, a
+    trade marked to the wrong screen, or an edge and a move that did not
+    split the total exactly would each show up as a gap at some step."""
+    cfg = GameConfig.for_session(preset)
+    g = game.Game(cfg, seed, storage=MemoryStorage(), settings=Settings(preset=preset, pricing_timer_s=15.0))
+    rec = Recording(g)
+    quit_at = None if quit_minute is None else round(quit_minute * 60 / cfg.dt)
+    agents.play(rec, agents.ScriptedPlayer(cfg, BENCH, quit_at_step=quit_at, let_timer_expire_every=11))
+    view = g._world.path.public
+    usd = cfg.dollars_per_bp_per_lot
+    d = desk_module.Desk()
+    states = 0
+    for m in rec.messages:
+        d.feed(m)
+        if m["type"] != "state":
+            continue
+        states += 1
+        pnl = d.message()["pnl"]
+        rows, tiles = pnl["rows"], pnl["tiles"]
+        total = m["book"]["total_usd"]
+        assert sum(r["total_usd"] for r in rows) == pytest.approx(total, abs=0.005), m["step"]
+        assert tiles["total_usd"] == pytest.approx(total, abs=0.005)
+        assert tiles["realised_usd"] + tiles["unrealised_usd"] == pytest.approx(total, abs=0.005)
+        assert sum(r["edge_usd"] for r in rows) == pytest.approx(tiles["edge_client_usd"] + tiles["venue_charge_usd"], abs=1e-6)
+        assert sum(r["move_usd"] for r in rows) == pytest.approx(tiles["move_usd"], abs=1e-6)
+        now = view.screen_at(m["step"])
+        for r in rows:
+            then = view.screen_at(r["step"])
+            assert r["screen_then"] == pytest.approx(then, abs=1e-9)
+            assert r["edge_usd"] == pytest.approx(r["quantity"] * (then - r["price"]) * usd, abs=1e-6)
+            assert r["move_usd"] == pytest.approx(r["quantity"] * (now - then) * usd, abs=1e-6)
+        if pnl["series"]["step"]:
+            assert pnl["series"]["pnl_usd"][-1] == pytest.approx(total, abs=0.005)
+    trades = g.session.book.trades
+    assert [(r["step"], r["quantity"], r["price"]) for r in rows] == [(t.step, t.quantity, t.price) for t in trades]
+    assert {r["kind"] for r in rows} >= {"client", "hedge"} and states > 20
+    # The series: at every screen reading the page was shown and every trade,
+    # all held, marked at the public screen then -- values from the book's
+    # trades and the public view, timing from the stream.
+    level = cfg.start_level
+    expected, position, cash = [], 0, 0.0
+    book = iter(trades)
+    for m in rec.messages:
+        if m["type"] != "event":
+            continue
+        k, data = m["step"], m["data"]
+        traded = (m["kind"] == "rfq_resolved" and data["outcome"] == "won") or (
+            m["kind"] in ("hedge_executed", "close_liquidation") and data["quantity"])
+        if traded:
+            t = next(book)
+            assert (t.step, t.quantity) == (k, data["quantity"])
+            position, cash = position + t.quantity, cash - t.quantity * (t.price - level)
+        if traded or m["kind"] == "screen_update":
+            expected.append((k, (cash + position * (view.screen_at(k) - level)) * usd, position))
+    series = pnl["series"]
+    got = list(zip(series["step"], series["pnl_usd"], series["position"]))
+    assert len(got) == len(expected)
+    for (s1, p1, q1), (s2, p2, q2) in zip(got, expected):
+        assert (s1, q1) == (s2, q2) and p1 == pytest.approx(p2, abs=1e-6)
+
+
+def test_a_random_seed_that_lands_on_a_played_world_is_drawn_again(tmp_path):
+    """Without --seed the host draws a seed; if the draw lands on a (config,
+    seed) the track record has already played, it draws again, so a scored
+    session is never on a world the player has seen. Forced here: the first
+    two draws are the played seed. Another preset's config with the same
+    seed is a different world and is accepted."""
+    cfg = GameConfig.for_session(30)
+    played = game.Game(cfg, 41, storage=DirectoryStorage(tmp_path), settings=Settings(preset=30))
+    game.run_headless(played, agents.ScriptedPlayer(cfg, BENCH))  # plays and records seed 41
+    track = records.TrackRecord.load(DirectoryStorage(tmp_path))
+    assert track.played(cfg, 41)
+
+    draws = iter([41, 41, 42])
+    again = server.new_host(30, None, records_dir=str(tmp_path), draw=lambda: next(draws))
+    assert again.game._world.seed == 42 and again.game.replay_of_played_seed is False
+    other = server.new_host(60, None, records_dir=str(tmp_path), draw=lambda: 41)
+    assert other.game._world.seed == 41 and other.game.replay_of_played_seed is False
+    explicit = server.new_host(30, 41, records_dir=str(tmp_path))
+    assert explicit.game.replay_of_played_seed is True  # --seed replays it, flagged
+    with pytest.raises(RuntimeError):
+        game.fresh_seed(cfg, track, lambda: 41, attempts=5)

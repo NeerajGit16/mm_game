@@ -1,7 +1,55 @@
+// @ts-check
 // Everything the page knows, built only from messages the server sent.
 // The page never holds anything else: reload it and the server's history
 // rebuilds the same store.
 
+/** @typedef {import("./protocol.js").ServerMessage} ServerMessage */
+/** @typedef {import("./protocol.js").EventMsg} EventMsg */
+
+/**
+ * @typedef {Object} Fill
+ * @property {number} t  seconds into the session
+ * @property {number | null} price
+ * @property {number} qty
+ * @property {"client" | "hedge" | "close"} src
+ */
+
+/**
+ * @typedef {Object} Store
+ * @property {Record<string, any> | null} config
+ * @property {number} dt
+ * @property {number} nSteps
+ * @property {number} tick
+ * @property {number} startLevel
+ * @property {number} limit
+ * @property {number | null} preset
+ * @property {number[]} printSteps
+ * @property {{client_id: number, category: string}[]} roster
+ * @property {boolean} replayOfPlayedSeed
+ * @property {{t: number[], y: number[]}} screen  one point per screen reading: seconds, bp
+ * @property {Fill[]} fills
+ * @property {{t: number, level: number, side: number}[]} doneAway
+ * @property {EventMsg[]} events  every event, in order
+ * @property {import("./protocol.js").StateMsg | null} state
+ * @property {import("./protocol.js").DeskMsg | null} desk
+ * @property {import("./protocol.js").HandbookMsg | null} handbook
+ * @property {boolean} begun
+ * @property {(Record<string, any> & {step: number}) | null} lastHedge
+ * @property {(Record<string, any> & {step: number}) | null} lastBlock
+ * @property {{at: number, detail: string}[]} errors
+ * @property {boolean} revealed
+ * @property {import("./protocol.js").SummaryMsg | null} summary
+ * @property {number} version
+ */
+
+/**
+ * A store once the first snapshot has arrived, and once the first desk has.
+ * Renderers take these: the one null check happens where rendering starts.
+ * @typedef {Store & {state: import("./protocol.js").StateMsg}} LiveStore
+ * @typedef {LiveStore & {desk: import("./protocol.js").DeskMsg}} DeskStore
+ */
+
+/** @returns {Store} */
 export function createStore() {
   return {
     config: null,
@@ -14,11 +62,13 @@ export function createStore() {
     printSteps: [],
     roster: [],
     replayOfPlayedSeed: false,
-    screen: { t: [], y: [] }, // seconds, bp: one point per screen reading
-    fills: [], // your trades: {t, price, qty, src: client | hedge | close}
-    doneAway: [], // RFQs that traded elsewhere: {t, level, side}
-    state: null, // the latest snapshot
-    desk: null, // the latest desk
+    screen: { t: [], y: [] },
+    fills: [],
+    doneAway: [],
+    events: [],
+    state: null,
+    desk: null,
+    handbook: null,
     begun: false,
     lastHedge: null,
     lastBlock: null,
@@ -29,9 +79,14 @@ export function createStore() {
   };
 }
 
+/**
+ * @param {Store} store
+ * @param {ServerMessage} msg
+ */
 export function apply(store, msg) {
   switch (msg.type) {
     case "event":
+      store.events.push(msg);
       applyEvent(store, msg);
       break;
     case "state":
@@ -42,6 +97,9 @@ export function apply(store, msg) {
       break;
     case "host":
       store.begun = msg.begun;
+      break;
+    case "handbook":
+      store.handbook = msg;
       break;
     case "error":
       store.errors.push({ at: performance.now(), detail: msg.detail });
@@ -56,6 +114,10 @@ export function apply(store, msg) {
   store.version += 1;
 }
 
+/**
+ * @param {Store} store
+ * @param {EventMsg} m
+ */
 function applyEvent(store, m) {
   const d = m.data;
   const t = m.step * store.dt;

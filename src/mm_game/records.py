@@ -20,6 +20,13 @@ nothing here runs during play.
 **Track record** -- one line per session across sessions. A session on a
 ``(config, seed)`` already played is flagged as a replay and excluded from
 the aggregates: you remember where the prints went.
+
+**Recorded sessions stay readable.** Every file carries its format version
+(and a replay its protocol version). The loaders dispatch on them through
+a table of readers, one per version this code can read; a later bump adds
+a reader -- or a migration to the current layout -- and keeps the old ones.
+``tests/test_saved_records.py`` loads a session saved under every version
+there has been.
 """
 
 from __future__ import annotations
@@ -143,10 +150,21 @@ def check_header(header: dict[str, Any]) -> tuple[GameConfig, int]:
 
 
 def load_replay(record: dict[str, Any]) -> ReplayFile:
-    if record.get("format") != REPLAY_FORMAT or record.get("format_version") != FORMAT_VERSION:
-        raise RecordError(f"not a version-{FORMAT_VERSION} replay file: {record.get('format')!r} {record.get('format_version')!r}")
-    if record.get("protocol_version") != PROTOCOL_VERSION:
-        raise RecordError(f"protocol {record.get('protocol_version')!r}; this engine speaks {PROTOCOL_VERSION}")
+    """A replay file of any version this code reads; anything else is
+    refused, never guessed at."""
+    if record.get("format") != REPLAY_FORMAT:
+        raise RecordError(f"not a replay file: {record.get('format')!r}")
+    version = (record.get("format_version"), record.get("protocol_version"))
+    reader = _REPLAY_READERS.get(version)
+    if reader is None:
+        raise RecordError(
+            f"replay file format {version[0]!r}, protocol {version[1]!r}: this code reads "
+            f"(format, protocol) {sorted(_REPLAY_READERS)}"
+        )
+    return reader(record)
+
+
+def _read_replay_format1_protocol2(record: dict[str, Any]) -> ReplayFile:
     config, seed = check_header(record["header"])
     try:
         settings = Settings(**record["settings"])
@@ -155,6 +173,25 @@ def load_replay(record: dict[str, Any]) -> ReplayFile:
     except (KeyError, TypeError, ValueError) as error:
         raise RecordError(f"unreadable settings: {error}") from None
     return ReplayFile(config, seed, settings, scoring, benchmark, dict(record["flags"]), list(record["actions"]))
+
+
+# (format version, protocol version) -> reader. Add, never remove.
+_REPLAY_READERS = {(1, 2): _read_replay_format1_protocol2}
+
+
+def load_coaching_record(record: dict[str, Any]) -> dict[str, Any]:
+    """A coaching record of any version this code reads, in the current
+    layout."""
+    if record.get("format") != RECORD_FORMAT:
+        raise RecordError(f"not a coaching record: {record.get('format')!r}")
+    reader = _RECORD_READERS.get(record.get("format_version"))
+    if reader is None:
+        raise RecordError(f"coaching record format {record.get('format_version')!r}: this code reads {sorted(_RECORD_READERS)}")
+    return reader(record)
+
+
+# format version -> reader (or migration to the current layout). Add, never remove.
+_RECORD_READERS = {1: lambda record: record}
 
 
 def drive(session: Session, actions: list[dict[str, Any]]) -> None:
@@ -668,14 +705,19 @@ class TrackRecord:
         if not storage.exists(cls.NAME):
             return cls()
         data = json.loads(storage.read_text(cls.NAME))
-        if data.get("format") != TRACK_FORMAT or data.get("format_version") != FORMAT_VERSION:
-            raise RecordError("not a readable track record")
-        return cls(data["entries"])
+        reader = _TRACK_READERS.get(data.get("format_version")) if data.get("format") == TRACK_FORMAT else None
+        if reader is None:
+            raise RecordError(f"not a readable track record: {data.get('format')!r} {data.get('format_version')!r}")
+        return cls(reader(data))
 
     def save(self, storage) -> None:
         storage.write_text(
             self.NAME, dumps({"format": TRACK_FORMAT, "format_version": FORMAT_VERSION, "entries": self.entries})
         )
+
+    def scored_sessions(self) -> int:
+        """Sessions that count: everything but replays of a played seed."""
+        return sum(1 for e in self.entries if not e["replay_of_played_seed"])
 
     def played(self, config: GameConfig, seed: int) -> bool:
         digest = config_digest(config)
@@ -728,3 +770,7 @@ class TrackRecord:
                 sum(e[you] for e in scored), sum(e[disc] for e in scored), sum(e[orc] for e in scored), min_gap_usd
             )
         return out
+
+
+# Track-record format version -> reader of its entries. Add, never remove.
+_TRACK_READERS = {1: lambda data: list(data["entries"])}

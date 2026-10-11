@@ -27,8 +27,9 @@ import tornado.websocket
 
 from mm_game.config import GameConfig
 from mm_game.engine import Settings
-from mm_game.game import Game
+from mm_game.game import Game, fresh_seed
 from mm_game.host import Host, WallClock
+from mm_game.records import TrackRecord
 from mm_game.storage import DirectoryStorage
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
@@ -87,9 +88,21 @@ def listen(host: Host, *, port: int = 0, tick_ms: int | None = TICK_MS):
     return server, sockets[0].getsockname()[1], ticker
 
 
-def new_host(preset: int, seed: int, *, records_dir: str, now: Callable[[], float] = time.monotonic) -> Host:
+def new_host(
+    preset: int,
+    seed: int | None,
+    *,
+    records_dir: str,
+    now: Callable[[], float] = time.monotonic,
+    draw: Callable[[], int] = lambda: secrets.randbelow(2**31),
+) -> Host:
+    """A hosted session on ``seed``, or on a fresh one -- never played on
+    this config -- when ``seed`` is None."""
     config = GameConfig.for_session(preset)
-    game = Game(config, seed, storage=DirectoryStorage(records_dir), settings=Settings(preset=preset))
+    storage = DirectoryStorage(records_dir)
+    if seed is None:
+        seed = fresh_seed(config, TrackRecord.load(storage), draw)
+    game = Game(config, seed, storage=storage, settings=Settings(preset=preset))
     return Host(game, WallClock(config.dt, now), records_dir=records_dir)
 
 
@@ -102,10 +115,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--port", type=int, default=0, help="localhost port (default: any free one)")
     parser.add_argument("--no-browser", action="store_true", help="do not open a browser")
     args = parser.parse_args(argv)
-    # The seed is chosen here, outside the session, and not shown: everything
-    # hidden regenerates from it.
-    seed = args.seed if args.seed is not None else secrets.randbelow(2**31)
-    host = new_host(args.preset, seed, records_dir=args.records)
+    # Without --seed, a fresh one is drawn (never one already played on this
+    # config) and not shown: everything hidden regenerates from it.
+    host = new_host(args.preset, args.seed, records_dir=args.records)
 
     async def serve() -> None:
         _, port, _ = listen(host, port=args.port)

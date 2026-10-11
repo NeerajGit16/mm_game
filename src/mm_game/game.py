@@ -82,6 +82,20 @@ class Game:
         return self.record
 
 
+def fresh_seed(
+    config: GameConfig, track: records.TrackRecord, draw: Callable[[], int], *, attempts: int = 1000
+) -> int:
+    """A seed this config has not been played on. A scored session is always
+    on a world the player has not seen, so a random draw that lands on a
+    played (config, seed) is drawn again. ``draw`` supplies candidates; the
+    seed is chosen before any world exists and is not a draw inside one."""
+    for _ in range(attempts):
+        seed = draw()
+        if not track.played(config, seed):
+            return seed
+    raise RuntimeError(f"no unplayed seed in {attempts} draws")
+
+
 def run_headless(game: Game, strategy: agents.Strategy) -> Game:
     """Play a whole game with a scripted strategy standing in for the player,
     through the same protocol a front end uses."""

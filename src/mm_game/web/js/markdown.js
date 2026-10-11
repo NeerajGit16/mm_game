@@ -1,18 +1,22 @@
+// @ts-check
 // Just enough Markdown for summary.md: headings, tables, nested lists,
 // paragraphs, bold and italics. Everything is escaped first.
 
 import { escapeHtml } from "./format.js";
 
+/** @param {string} text */
 function inline(text) {
   return escapeHtml(text)
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
     .replace(/(^|[^*])\*([^*\s][^*]*?)\*/g, "$1<em>$2</em>");
 }
 
+/** @param {string} line */
 function cells(line) {
   return line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
 }
 
+/** @param {string[]} lines */
 function table(lines) {
   const [head, , ...body] = lines;
   const th = cells(head).map((c) => `<th>${inline(c)}</th>`).join("");
@@ -20,6 +24,7 @@ function table(lines) {
   return `<table><thead><tr>${th}</tr></thead><tbody>${rows}</tbody></table>`;
 }
 
+/** @param {string[]} lines */
 function list(lines) {
   let html = "<ul>";
   let nested = false;
@@ -33,6 +38,7 @@ function list(lines) {
   return html + (nested ? "</ul>" : "") + "</ul>";
 }
 
+/** @param {string} source */
 export function renderMarkdown(source) {
   const lines = source.split("\n");
   const out = [];

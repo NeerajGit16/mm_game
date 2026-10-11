@@ -181,6 +181,7 @@ def _mutate(replay: dict, change) -> dict:
         (lambda r: r["header"].__setitem__("config_schema_version", CONFIG_SCHEMA_VERSION + 1), "config schema"),
         (lambda r: r["header"].pop("config_schema_version"), "config schema"),
         (lambda r: r.__setitem__("format_version", 99), "replay file"),
+        (lambda r: r.__setitem__("protocol_version", 99), "protocol 99"),
         (lambda r: r.__setitem__("format", "something.else"), "replay file"),
         (lambda r: r["header"].__setitem__("scheme_version", 99), "scheme"),
         (lambda r: r["header"]["canary"]["normal"].__setitem__(0, 0.5), "transforms have changed"),

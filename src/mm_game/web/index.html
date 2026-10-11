@@ -28,7 +28,8 @@
     <div class="tb"><span class="lbl">P&amp;L</span><span id="tb-pnl" class="num big">$0</span><span id="tb-unreal" class="num muted"></span></div>
     <div class="tb"><span class="lbl">Penalty</span><span id="tb-penalty" class="num">$0</span></div>
     <div class="tb"><span class="lbl">Risk-adj.</span><span id="tb-riskadj" class="num big">$0</span></div>
-    <span id="tb-flag" class="flag" hidden>replay · not scored</span>
+    <span id="tb-flag" class="flag" hidden>practice replay — not scored</span>
+    <button class="btn quiet" id="handbook-btn" title="?">Handbook <kbd>?</kbd></button>
     <button class="btn quiet" id="quit-btn" title="Stop trading; the position rides to the close">Quit</button>
   </header>
 
@@ -69,9 +70,72 @@
         </div>
       </div>
 
-      <div class="tab-body placeholder" id="tab-pnl" hidden><p>The P&amp;L tab comes in the next build stage.</p></div>
-      <div class="tab-body placeholder" id="tab-clients" hidden><p>The full client roster comes in the next build stage.</p></div>
-      <div class="tab-body placeholder" id="tab-log" hidden><p>The calendar and event log come in the next build stage.</p></div>
+      <div class="tab-body" id="tab-pnl" hidden>
+        <div class="panel tiles-panel">
+          <div class="panel-head"><span class="title">Session P&amp;L · every trade marked to the current screen</span><span class="muted small">live · screen-based</span></div>
+          <div class="tiles">
+            <div class="tile"><div class="lbl">Edge · client fills</div><div class="num tile-v" id="tile-edge"></div><div class="muted small" id="tile-edge-sub"></div></div>
+            <div class="op">+</div>
+            <div class="tile"><div class="lbl">Venue charge · hedges</div><div class="num tile-v" id="tile-venue"></div><div class="muted small" id="tile-venue-sub"></div></div>
+            <div class="op">+</div>
+            <div class="tile"><div class="lbl">Moves since the trade</div><div class="num tile-v" id="tile-move"></div><div class="muted small">what the market did to what you held</div></div>
+            <div class="op">=</div>
+            <div class="tile total"><div class="lbl">P&amp;L</div><div class="num tile-v" id="tile-total"></div><div class="muted small" id="tile-total-sub"></div></div>
+          </div>
+        </div>
+        <div class="panel pnl-charts">
+          <div class="panel-head"><span class="title">P&amp;L through the session</span><span class="muted small">dashed: prints · solid: now</span></div>
+          <div id="pnl-chart" class="chart-box"></div>
+          <div class="lbl">Position</div>
+          <div id="pos-chart" class="chart-box short"></div>
+        </div>
+        <div class="panel pnl-table-panel">
+          <div class="panel-head"><span class="title">Ticket by ticket</span><span class="muted small">click a column to sort · rows add up to the P&amp;L above</span></div>
+          <div class="scroll">
+            <table class="grid sortable" id="pnl-table">
+              <thead><tr>
+                <th data-sort="step">Time</th><th data-sort="ticket">Ticket</th><th data-sort="with">With</th><th data-sort="quantity">You</th>
+                <th class="r" data-sort="price">Price</th><th class="r" data-sort="screen_then">Screen then</th>
+                <th class="r" data-sort="edge_usd">Edge</th><th class="r" data-sort="move_usd">Move since</th><th class="r" data-sort="total_usd">Total</th>
+              </tr></thead>
+              <tbody></tbody>
+              <tfoot><tr><td colspan="6" id="pnl-foot-label">All</td><td class="r" id="pnl-foot-edge"></td><td class="r" id="pnl-foot-move"></td><td class="r" id="pnl-foot-total"></td></tr></tfoot>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="tab-body" id="tab-clients" hidden>
+        <div class="panel fill">
+          <div class="panel-head"><span class="title">Clients · your trades with each, marked against the screen</span><span class="muted small">click a column to sort</span></div>
+          <div class="scroll">
+            <table class="grid sortable" id="clients-table">
+              <thead><tr>
+                <th data-sort="client_id">Client</th><th data-sort="category">Category</th><th class="r" data-sort="rfqs">RFQs</th>
+                <th class="r" data-sort="quoted">Quoted</th><th class="r" data-sort="traded">Traded</th><th class="r" data-sort="hit_rate">Hit rate</th>
+                <th class="r" data-sort="lots">Lots</th><th class="r" data-sort="net">Your net</th><th class="r" data-sort="last_trade_step">Last trade</th>
+                <th class="r" data-sort="60s">60s / lot</th><th class="r" data-sort="lots60">Lots in 60s</th>
+                <th class="r" data-sort="300s">300s / lot</th><th class="r" data-sort="lots300">Lots in 300s</th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="tab-body" id="tab-log" hidden>
+        <div class="panel calendar-panel">
+          <div class="panel-head"><span class="title">Print calendar</span><span class="muted small">times only, never outcomes</span></div>
+          <table class="grid" id="calendar-table"><thead><tr><th>Print</th><th>Time</th><th>Status</th></tr></thead><tbody></tbody></table>
+        </div>
+        <div class="panel fill">
+          <div class="panel-head"><span class="title">Event log</span><span class="muted small">every event in order · filter by kind</span></div>
+          <div id="log-filters" class="filters"></div>
+          <div class="scroll" id="log-scroll">
+            <table class="grid" id="log-table"><thead><tr><th>Time</th><th class="r">#</th><th>Kind</th><th>What</th></tr></thead><tbody></tbody></table>
+          </div>
+        </div>
+      </div>
     </section>
 
     <!-- Right: the ticket and the compact roster, always visible. -->
@@ -170,9 +234,9 @@
 <div id="toasts"></div>
 
 <div id="startscreen" class="cover">
-  <div class="card">
+  <div class="card start">
     <h1 id="start-title">Session</h1>
-    <p id="start-flag" class="flag" hidden>Replay of a seed you have played: not scored in the track record.</p>
+    <p id="start-flag" class="flag" hidden>Practice replay — not scored. You have played this world before.</p>
     <p>The clock starts when you press <kbd>Space</kbd>. It stops whenever an RFQ is on the ticket.</p>
     <button class="btn primary" id="start-btn">Start <kbd>Space</kbd></button>
     <table class="keymap">
@@ -181,7 +245,16 @@
       <tr><td><kbd>0</kbd></td><td>skew back to zero</td><td><kbd>H</kbd></td><td>size box: digits, then <kbd>B</kbd>/<kbd>S</kbd></td></tr>
       <tr><td><kbd>Enter</kbd> <kbd>P</kbd></td><td>send / pass</td><td><kbd>F</kbd> <kbd>F</kbd></td><td>flatten (twice within a second)</td></tr>
       <tr><td><kbd>Space</kbd></td><td>pause / resume</td><td><kbd>1</kbd><kbd>2</kbd><kbd>4</kbd> <kbd>Tab</kbd></td><td>speed · next tab</td></tr>
+      <tr><td><kbd>?</kbd></td><td>the desk handbook (pauses the clock)</td><td></td><td></td></tr>
     </table>
+    <div id="start-handbook" class="handbook"></div>
+  </div>
+</div>
+
+<div id="handbookscreen" class="cover" hidden>
+  <div class="card start">
+    <div class="end-head"><h1>Desk handbook</h1><span class="muted small"><kbd>?</kbd> or <kbd>Esc</kbd> closes · the clock stays paused</span></div>
+    <div id="handbook-body" class="handbook"></div>
   </div>
 </div>
 
