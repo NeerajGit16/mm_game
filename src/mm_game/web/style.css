@@ -256,6 +256,10 @@ table.sortable th.sorted { color: var(--ink); }
 .switch { display: inline-flex; gap: 2px; }
 .switch .btn { padding: 2px 8px; font-size: 12px; }
 #rv-breakdown td:first-child { font-family: var(--sans); }
+table.grid.rv-track-gaps { width: auto; min-width: 560px; align-self: flex-start; margin-bottom: 10px; }
+.rv-track-gaps td:first-child { font-family: var(--sans); }
+#rv-track-table tr.group th { position: static; text-align: center; border-bottom: none; padding-bottom: 0; }
+#rv-track-table tr.group th[colspan="6"], #rv-track-table tr.group th[colspan="4"] { border-bottom: 1px solid var(--line); }
 #rv-breakdown tr.total td { font-weight: 700; border-top: 1px solid var(--line); }
 .moment { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; background: var(--panel-2); cursor: pointer; }
 .moment:hover { border-color: #3a4552; }

@@ -369,7 +369,8 @@ def test_a_session_through_the_websocket_reproduces_the_headless_run(lt, preset,
     assert host.game.session.actions == headless.session.actions
     assert host.game.record == headless.record
     summary = next(m for m in wire.messages() if m["type"] == "summary")
-    assert summary["markdown"] == records.markdown_summary(headless.record)
+    assert summary["markdown"] == headless.storage.read_text(f"sessions/{headless.session_id}/summary.md")
+    assert summary["markdown"] == records.markdown_summary(headless.record, headless.track.aggregates())
     assert summary["session_id"] == headless.session_id
 
 

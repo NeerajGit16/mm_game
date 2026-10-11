@@ -47,6 +47,7 @@ class Game:
         )
         self.session_id: str | None = None
         self.record: dict[str, Any] | None = None
+        self.summary: str | None = None
 
     def start(self) -> list[dict[str, Any]]:
         return self.session.start()
@@ -73,11 +74,14 @@ class Game:
             world, self.session, scoring=self.scoring, benchmark=self.benchmark, flags=flags
         )
         self.session_id = self.track.next_id(self.session.settings, world.seed)
+        self.track.add(self.session_id, world.config, world.seed, self.record)
+        # The summary carries the track record as it stands with this session
+        # in it; written once, never rewritten when later sessions change it.
+        self.summary = records.markdown_summary(self.record, self.track.aggregates())
         base = f"sessions/{self.session_id}"
         self.storage.write_text(f"{base}/replay.json", records.dumps(replay))
         self.storage.write_text(f"{base}/coaching_record.json", records.dumps(self.record))
-        self.storage.write_text(f"{base}/summary.md", records.markdown_summary(self.record))
-        self.track.add(self.session_id, world.config, world.seed, self.record)
+        self.storage.write_text(f"{base}/summary.md", self.summary)
         self.track.save(self.storage)
         return self.record
 

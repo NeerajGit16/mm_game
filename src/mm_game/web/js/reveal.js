@@ -16,6 +16,8 @@ import { escapeHtml, longCategory, mmss, money, percent, price, shortCategory, s
 /** @typedef {import("./protocol.js").ClientReveal} ClientReveal */
 /** @typedef {import("./protocol.js").RfqLayer} RfqLayer */
 /** @typedef {import("./protocol.js").BotRfq} BotRfq */
+/** @typedef {import("./protocol.js").Pooled} Pooled */
+/** @typedef {import("./protocol.js").PooledScore} PooledScore */
 
 const HORIZON_LABEL = /** @type {Record<string, string>} */ ({ "60s": "60s", "300s": "300s", next_event: "next event" });
 const BY_TYPE = [
@@ -24,6 +26,8 @@ const BY_TYPE = [
   ["informed_move", "Adverse selection · informed, moves"],
 ];
 const SHOWN_CLIENTS = 4;
+const TRACK_SCORES = /** @type {const} */ ([["pnl", "P&L"], ["risk_adjusted", "risk-adjusted"]]);
+const TRACK_WHO = /** @type {const} */ ([["you_minus_disciplined", "You"], ["oracle_minus_disciplined", "Flow oracle"]]);
 
 /** @param {string} id */
 const $ = (id) => /** @type {HTMLElement} */ (document.getElementById(id));
@@ -36,6 +40,22 @@ const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
  * @param {number} x
  */
 const cell = (x) => `<td class="r ${tone(Math.abs(x) < 0.5 ? 0 : x)}">${money(x)}</td>`;
+
+/**
+ * A pooled gap's mean per session, ± its standard error when there is one.
+ * @param {Pooled} p
+ */
+const meanSe = (p) => p.mean_usd === null ? "n/a" : money(p.mean_usd) + (p.se_usd === null ? "" : ` ± ${money(p.se_usd, false)}`);
+
+/**
+ * The pooled capture ratio, or why it is not shown yet -- summary.md's words.
+ * @param {PooledScore} s
+ * @param {number} threshold
+ */
+function pooledRatio(s, threshold) {
+  if (s.capture_ratio !== null) return percent(s.capture_ratio);
+  return `n/a — not enough flow-reading edge yet (${money(s.oracle_minus_disciplined.total_usd, false)} of ${money(threshold, false)})`;
+}
 
 /** @param {ClientReveal} c */
 export function knewAbout(c) {
@@ -85,8 +105,11 @@ function score(record, track) {
   }
   if (track) {
     const a = track.aggregates;
-    text += ` Track record, pooled over ${plural(a.sessions, "scored session")}: <b>${percent(a.pooled_capture_ratio_pnl)}</b>`
-      + (a.replays_excluded ? ` (${plural(a.replays_excluded, "practice replay")} not counted).` : ".");
+    const p = a.pnl;
+    text += ` Track record, pooled over ${plural(a.sessions, "scored session")}: you ${money(p.you_minus_disciplined.total_usd)} against the disciplined bot`
+      + ` (${meanSe(p.you_minus_disciplined)} a session), the flow oracle ${money(p.oracle_minus_disciplined.total_usd)}`
+      + ` (${meanSe(p.oracle_minus_disciplined)}); pooled capture ratio <b id="rv-capture-pooled">${pooledRatio(p, a.pooled_min_gap_usd)}</b>`
+      + (a.replays_excluded ? `; ${plural(a.replays_excluded, "practice replay")} not counted.` : ".");
   }
   $("rv-capture").innerHTML = text;
   /** @param {import("./protocol.js").RuleItem} r */
@@ -230,16 +253,26 @@ function trackTab(track, sessionId) {
     return;
   }
   const a = track.aggregates;
-  $("rv-track-pooled").innerHTML = `Pooled over ${plural(a.sessions, "scored session")}: capture ratio <b>${percent(a.pooled_capture_ratio_pnl)}</b> on P&amp;L, <b>${percent(a.pooled_capture_ratio_risk_adjusted)}</b> risk-adjusted; `
-    + `mean P&amp;L ${a.pnl_usd === null ? "n/a" : money(a.pnl_usd, false)}, risk-adjusted ${a.risk_adjusted_usd === null ? "n/a" : money(a.risk_adjusted_usd, false)}. `
-    + `${plural(a.replays_excluded, "practice replay")} shown, not counted.`;
+  $("rv-track-pooled").innerHTML = `Pooled over ${plural(a.sessions, "scored session")}; ${plural(a.replays_excluded, "practice replay")} shown, not counted. `
+    + `Mean P&amp;L ${a.pnl_usd === null ? "n/a" : money(a.pnl_usd, false)}, risk-adjusted ${a.risk_adjusted_usd === null ? "n/a" : money(a.risk_adjusted_usd, false)}. `
+    + `Pooled capture ratio: P&amp;L <b data-ratio="pnl">${pooledRatio(a.pnl, a.pooled_min_gap_usd)}</b>; `
+    + `risk-adjusted <b data-ratio="risk_adjusted">${pooledRatio(a.risk_adjusted, a.pooled_min_gap_usd)}</b>.`;
+  // The same rows as summary.md's track-record table.
+  body("rv-track-gaps").innerHTML = TRACK_SCORES.flatMap(([key, label]) => TRACK_WHO.map(([who, name]) => {
+    const p = a[key][who];
+    const row = `${name}, ${label}`;
+    return `<tr data-row="${escapeHtml(row)}"><td>${escapeHtml(row)}</td>${cell(p.total_usd)}`
+      + `<td class="r">${p.mean_usd === null ? "n/a" : money(p.mean_usd)}</td><td class="r">${p.se_usd === null ? "n/a" : money(p.se_usd, false)}</td></tr>`;
+  })).join("");
   body("rv-track-table").innerHTML = track.entries.map((e) => {
     const status = e.replay_of_played_seed ? "practice replay — not counted" : e.ended_early_at_step !== null ? "scored · ended early" : "scored";
     return `<tr data-session="${escapeHtml(e.session_id)}" class="${e.session_id === sessionId ? "current" : ""}${e.replay_of_played_seed ? " muted" : ""}">
       <td>${escapeHtml(e.session_id)}</td><td class="r">${e.preset ?? "—"}</td><td class="r">${e.seed}</td>
-      <td class="r">${money(e.pnl_usd, false)}</td><td class="r">${money(e.risk_adjusted_usd, false)}</td>
-      <td class="r">${money(e.disciplined_pnl_usd, false)}</td><td class="r">${money(e.oracle_pnl_usd, false)}</td>
-      <td class="r">${percent(e.capture_ratio_pnl)}</td><td class="r">${percent(e.capture_ratio_risk_adjusted)}</td><td>${status}</td></tr>`;
+      <td class="r">${money(e.pnl_usd, false)}</td><td class="r">${money(e.disciplined_pnl_usd, false)}</td><td class="r">${money(e.oracle_pnl_usd, false)}</td>
+      ${cell(e.you_minus_disciplined_pnl_usd)}${cell(e.oracle_minus_disciplined_pnl_usd)}<td class="r">${percent(e.capture_ratio_pnl)}</td>
+      <td class="r">${money(e.risk_adjusted_usd, false)}</td>
+      ${cell(e.you_minus_disciplined_risk_adjusted_usd)}${cell(e.oracle_minus_disciplined_risk_adjusted_usd)}<td class="r">${percent(e.capture_ratio_risk_adjusted)}</td>
+      <td>${status}</td></tr>`;
   }).join("");
 }
 

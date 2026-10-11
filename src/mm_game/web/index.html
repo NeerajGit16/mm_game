@@ -362,11 +362,18 @@
     <div class="panel fill">
       <div class="panel-head"><span class="title">Track record</span><span class="muted small">every session; practice replays shown, never counted</span></div>
       <p id="rv-track-pooled" class="rv-text"></p>
+      <table class="grid rv-track-gaps" id="rv-track-gaps"><thead><tr>
+        <th>Against the disciplined bot</th><th class="r">Pooled</th><th class="r">Mean per session</th><th class="r">Standard error</th>
+      </tr></thead><tbody></tbody></table>
       <div class="scroll">
-        <table class="grid" id="rv-track-table"><thead><tr>
-          <th>Session</th><th class="r">Preset</th><th class="r">Seed</th><th class="r">P&amp;L</th><th class="r">Risk-adj.</th>
-          <th class="r">Disciplined</th><th class="r">Flow oracle</th><th class="r">Capture (P&amp;L)</th><th class="r">Capture (risk-adj.)</th><th>Status</th>
-        </tr></thead><tbody></tbody></table>
+        <table class="grid" id="rv-track-table"><thead>
+          <tr class="group"><th colspan="3"></th><th colspan="6">P&amp;L</th><th colspan="4">Risk-adjusted</th><th></th></tr>
+          <tr>
+            <th>Session</th><th class="r">Preset</th><th class="r">Seed</th>
+            <th class="r">You</th><th class="r">Disciplined</th><th class="r">Flow oracle</th><th class="r">You − disc.</th><th class="r">Oracle − disc.</th><th class="r">Capture</th>
+            <th class="r">You</th><th class="r">You − disc.</th><th class="r">Oracle − disc.</th><th class="r">Capture</th><th>Status</th>
+          </tr>
+        </thead><tbody></tbody></table>
       </div>
     </div>
   </section>

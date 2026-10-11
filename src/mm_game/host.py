@@ -35,7 +35,7 @@ import math
 import time
 from typing import Any, Callable, Protocol
 
-from mm_game import handbook, protocol, records
+from mm_game import handbook, protocol
 from mm_game.desk import Desk
 from mm_game.engine import Session
 from mm_game.game import Game
@@ -172,9 +172,9 @@ class Host:
                 "type": "summary",
                 "session_id": self.game.session_id,
                 "saved_to": f"{self.records_dir}/sessions/{self.game.session_id}/",
-                "markdown": records.markdown_summary(self.game.record),
+                "markdown": self.game.summary,
             }
-            track = self.game.track.message(self.game.scoring.capture_ratio_min_usd)
+            track = self.game.track.message()
             self._latest["summary"] = summary
             self._latest["track"] = track
             batch += [summary, track]

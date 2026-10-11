@@ -246,13 +246,118 @@ def test_replay_of_a_played_seed_is_flagged_and_excluded():
     assert "Replay of a seed already played" in summary
     track = records.TrackRecord.load(storage)
     assert [e["replay_of_played_seed"] for e in track.entries] == [False, True, False]
-    agg = track.aggregates(min_gap_usd=1.0)
+    agg = track.aggregates()
     assert (agg["sessions"], agg["replays_excluded"]) == (2, 1)
     scored = [track.entries[0], track.entries[2]]
     assert agg["pnl_usd"] == pytest.approx(sum(e["pnl_usd"] for e in scored) / 2)
     gap = sum(e["oracle_pnl_usd"] - e["disciplined_pnl_usd"] for e in scored)
-    pooled = sum(e["pnl_usd"] - e["disciplined_pnl_usd"] for e in scored) / gap if gap >= 1.0 else None
-    assert agg["pooled_capture_ratio_pnl"] == (pytest.approx(pooled) if pooled is not None else None)
+    assert agg["pnl"]["oracle_minus_disciplined"]["total_usd"] == pytest.approx(gap)
+    pooled = sum(e["pnl_usd"] - e["disciplined_pnl_usd"] for e in scored) / gap if gap >= 10_000 else None
+    assert agg["pnl"]["capture_ratio"] == (pytest.approx(pooled) if pooled is not None else None)
+    # Each summary carries the track record as it stood when it was written.
+    assert "This practice replay is not counted; the track record holds 1 scored session (1 practice replay left out)." in summary
+    assert "After this session the track record holds 1 scored session." in files(storage, first)[2]
+    assert "After this session the track record holds 2 scored sessions (1 practice replay left out)." in files(storage, other)[2]
+
+
+def track_entry(sid: str, you: float, disc: float, oracle: float, *, risk: tuple[float, float, float] | None = None,
+                replay: bool = False) -> dict:
+    """A track-record line with the scores given: P&L (you, disciplined,
+    oracle) and risk-adjusted (the same unless given)."""
+    ry, rd, ro = risk if risk is not None else (you, disc, oracle)
+    return {
+        "session_id": sid, "config_digest": "x", "seed": 1, "preset": 60,
+        "replay_of_played_seed": replay, "ended_early_at_step": None,
+        "pnl_usd": you, "risk_adjusted_usd": ry,
+        "capture_ratio_pnl": None, "capture_ratio_risk_adjusted": None,
+        "disciplined_pnl_usd": disc, "disciplined_risk_adjusted_usd": rd,
+        "oracle_pnl_usd": oracle, "oracle_risk_adjusted_usd": ro,
+    }
+
+
+# Three scored sessions and a practice replay, worked out by hand.
+#   P&L, you - disciplined:     1,000   3,000   5,000  -> sum 9,000, mean 3,000
+#     deviations -2,000, 0, 2,000; sample variance 8e6 / 2 = 4e6;
+#     standard error sqrt(4e6 / 3) = 1,154.70
+#   P&L, oracle - disciplined:  4,000  -2,000   7,000  -> sum 9,000, mean 3,000
+#     deviations 1,000, -5,000, 4,000; sample variance 42e6 / 2 = 21e6;
+#     standard error sqrt(21e6 / 3) = sqrt(7e6) = 2,645.75
+#   Risk-adjusted, you - disciplined: 0, 600, -300 -> sum 300, mean 100;
+#     deviations -100, 500, -400; variance 42e4 / 2 = 21e4; s.e. sqrt(7e4) = 264.58
+#   Risk-adjusted, oracle - disciplined: 3,000, 3,000, 3,000 -> sum 9,000, s.e. 0
+# The replay's +$50,000 against the disciplined bot, if it were counted,
+# would move every one of these.
+HAND = [
+    track_entry("a", 11_000, 10_000, 14_000, risk=(9_000, 9_000, 12_000)),
+    track_entry("b", 5_000, 2_000, 0, risk=(1_600, 1_000, 4_000)),
+    track_entry("c", -1_000, -6_000, 1_000, risk=(-5_300, -5_000, -2_000)),
+    track_entry("r", 60_000, 10_000, 70_000, replay=True),
+]
+
+
+def test_the_pooled_gaps_and_standard_errors_match_a_hand_calculation():
+    """Per session and pooled, your gap and the oracle's to the disciplined
+    bot, with the mean per session and its standard error (sample standard
+    deviation over root n), on both scores, are the numbers worked out by
+    hand above -- the replay left out, and the session the oracle lost
+    (b: -$2,000) kept in. A population standard deviation, a replay
+    counted, or a pool that dropped the oracle's losing sessions would each
+    move a number."""
+    track = records.TrackRecord(copy.deepcopy(HAND))
+    agg = track.aggregates()
+    assert (agg["sessions"], agg["replays_excluded"]) == (3, 1)
+    want = {
+        ("pnl", "you_minus_disciplined"): (9_000, 3_000, 1_154.7005),
+        ("pnl", "oracle_minus_disciplined"): (9_000, 3_000, 2_645.7513),
+        ("risk_adjusted", "you_minus_disciplined"): (300, 100, 264.5751),
+        ("risk_adjusted", "oracle_minus_disciplined"): (9_000, 3_000, 0.0),
+    }
+    for (score, who), (total, mean, se) in want.items():
+        got = agg[score][who]
+        assert (got["total_usd"], got["mean_usd"]) == (pytest.approx(total), pytest.approx(mean)), (score, who)
+        assert got["se_usd"] == pytest.approx(se, abs=1e-3), (score, who)
+    entries = {e["session_id"]: e for e in track.message()["entries"]}
+    assert set(entries) == {"a", "b", "c", "r"}  # the replay is shown, not counted
+    assert [entries[s]["oracle_minus_disciplined_pnl_usd"] for s in "abcr"] == [4_000, -2_000, 7_000, 60_000]
+    assert [entries[s]["you_minus_disciplined_risk_adjusted_usd"] for s in "abcr"] == [0, 600, -300, 50_000]
+    one = records.TrackRecord(copy.deepcopy(HAND[:1])).aggregates()["pnl"]["you_minus_disciplined"]
+    assert (one["total_usd"], one["mean_usd"], one["se_usd"]) == (1_000, 1_000, None)
+    lines = records.track_lines(agg, counted=True)
+    assert "| You, P&L | +$9,000 | +$3,000 | $1,155 |" in lines
+    assert "| Flow oracle, P&L | +$9,000 | +$3,000 | $2,646 |" in lines
+    assert "| You, risk-adjusted | +$300 | +$100 | $265 |" in lines
+
+
+def test_the_pooled_capture_ratio_is_hidden_below_10000_and_shown_at_it():
+    """The pooled ratio stays n/a, with how far the oracle's pooled edge has
+    got, until that edge is $10,000; at exactly $10,000 it appears, on each
+    score by its own pooled gap. The per-session $2,000 floor does not open
+    it (three sessions of $2,500 each stay n/a), and neither does a
+    practice replay with a huge oracle edge."""
+    below = HAND[:3] + [track_entry("d", 0, 0, 999)]  # oracle pooled: 9,999
+    agg = records.TrackRecord(copy.deepcopy(below)).aggregates()
+    assert agg["pnl"]["oracle_minus_disciplined"]["total_usd"] == 9_999
+    assert agg["pnl"]["capture_ratio"] is None
+    text = "\n".join(records.track_lines(agg, counted=True))
+    assert "Pooled capture ratio: P&L n/a — not enough flow-reading edge yet ($9,999 of $10,000)" in text
+
+    # Oracle pooled: P&L 10,000 (you 9,000); risk-adjusted 9,999.
+    at = HAND[:3] + [track_entry("d", 0, 0, 1_000, risk=(0, 0, 999))]
+    agg = records.TrackRecord(copy.deepcopy(at)).aggregates()
+    assert agg["pnl"]["capture_ratio"] == pytest.approx(9_000 / 10_000)
+    assert agg["risk_adjusted"]["capture_ratio"] is None
+    assert ("Pooled capture ratio: P&L 0.90; risk-adjusted n/a — not enough flow-reading edge yet ($9,999 of $10,000)."
+            in records.track_lines(agg, counted=True))
+    # And the other way round: risk-adjusted at 10,000 (you 300), P&L at 9,999.
+    other = HAND[:3] + [track_entry("d", 0, 0, 999, risk=(0, 0, 1_000))]
+    agg = records.TrackRecord(copy.deepcopy(other)).aggregates()
+    assert (agg["pnl"]["capture_ratio"], agg["risk_adjusted"]["capture_ratio"]) == (None, pytest.approx(300 / 10_000))
+
+    two_thousand_each = [track_entry(s, 0, 0, 2_500) for s in "abc"]  # 7,500 pooled
+    agg = records.TrackRecord(two_thousand_each).aggregates()
+    assert agg["pnl"]["capture_ratio"] is None
+    with_replay = copy.deepcopy(below) + [track_entry("r", 0, 0, 100_000, replay=True)]
+    assert records.TrackRecord(with_replay).aggregates()["pnl"]["capture_ratio"] is None
 
 
 def test_benchmarks_play_the_identical_world(monkeypatch):

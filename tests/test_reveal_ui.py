@@ -11,6 +11,9 @@ silent failure it catches.
 from __future__ import annotations
 
 import json
+import math
+import re
+import shutil
 import urllib.error
 import urllib.request
 
@@ -243,7 +246,7 @@ def test_the_tabs_show_every_client_every_ticket_and_the_track_record(browser, s
         track = page.eval_on_selector_all("#rv-track-table tbody tr", "rs => rs.map(r => [r.dataset.session, r.lastElementChild.textContent])")
         assert [t[0] for t in track] == ids
         assert track[1][1] == "practice replay — not counted" and track[0][1].startswith("scored")
-        assert "1 scored session" in page.text_content("#rv-track-pooled")
+        assert "1 scored session; 1 practice replay shown, not counted" in page.text_content("#rv-track-pooled")
         assert page.is_hidden("#rv-flag")
         assert not errors, errors
     finally:
@@ -256,6 +259,93 @@ def test_the_tabs_show_every_client_every_ticket_and_the_track_record(browser, s
     finally:
         page.close()
         lt.close()
+
+
+def track_table(md: str) -> tuple[dict, dict]:
+    """summary.md's track-record table, by row; and its pooled ratios."""
+    lines = md.splitlines()
+    i = lines.index("| Against the disciplined bot | Pooled | Mean per session | Standard error |") + 2
+    rows = {}
+    while lines[i].startswith("|"):
+        cells = [c.strip() for c in lines[i].strip("|").split("|")]
+        rows[cells[0]] = cells[1:]
+        i += 1
+    ratio = next(re.match(r"Pooled capture ratio: P&L (.*); risk-adjusted (.*)\.$", ln) for ln in lines if ln.startswith("Pooled capture ratio"))
+    return rows, {"pnl": ratio.group(1), "risk_adjusted": ratio.group(2)}
+
+
+def same(page_text: str, md_text: str) -> bool:
+    """One figure as the page and summary.md print it: dollars, n/a with
+    its reason, or a ratio (0.42 in summary.md, 42% on the page)."""
+    p, m = page_text.replace("−", "-"), md_text.replace("−", "-")
+    if m.startswith("n/a"):
+        return p == m
+    if p.endswith("%"):
+        return abs(number(p) - float(m) * 100) <= 1  # each rounds its own way
+    return number(p) == number(m)
+
+
+def test_the_track_record_agrees_with_summary_md_and_the_ratio_waits_for_10000(browser, saved, tmp_path):
+    """The Track tab's pooled table -- your gap and the oracle's to the
+    disciplined bot, pooled, mean per session, standard error -- and its
+    pooled ratios are summary.md's, row by row, for the scored session and
+    for the practice replay written after it (the replay left out of both,
+    so they agree); the summary screen's track line shows the same pooled
+    ratio. Then the same folder with a second scored session (so there is a
+    standard error to show) and the oracles' pooled edge set to $9,999 and
+    to exactly $10,000: n/a with how far it has got, then the ratio, and the
+    pooled table still summary.md's. A page that gated on its own, or a
+    summary.md that disagreed with it, would fail."""
+    root, ids = saved
+    page, lt, errors = open_reveal(browser, root, ids[0])
+    try:
+        page.click("#rv-tabs [data-rtab='track']")
+        shown = dict(page.eval_on_selector_all(
+            "#rv-track-gaps tbody tr", "rs => rs.map(r => [r.dataset.row, [...r.children].slice(1).map(c => c.textContent)])"))
+        ratios = {k: page.text_content(f"#rv-track-pooled [data-ratio='{k}']") for k in ("pnl", "risk_adjusted")}
+        line = page.text_content("#rv-capture-pooled")
+        assert not errors, errors
+    finally:
+        page.close()
+        lt.close()
+    for sid in ids:
+        rows, md_ratios = track_table(DirectoryStorage(root).read_text(f"sessions/{sid}/summary.md"))
+        assert set(shown) == set(rows) and len(rows) == 4
+        for name, cells in rows.items():
+            assert all(same(p, m) for p, m in zip(shown[name], cells, strict=True)), (sid, name, shown[name], cells)
+        assert all(same(ratios[k], md_ratios[k]) for k in ratios), (ratios, md_ratios)
+    assert line == ratios["pnl"]
+
+    # A second scored session, so there is a standard error to show.
+    folder = tmp_path / "records"
+    shutil.copytree(root, folder)
+    track = records.TrackRecord.load(DirectoryStorage(folder))
+    scored = track.entries[0]
+    extra = {**scored, "session_id": "extra", "pnl_usd": scored["pnl_usd"] + 3_000.0,
+             "risk_adjusted_usd": scored["risk_adjusted_usd"] - 2_000.0,
+             "disciplined_pnl_usd": 0.0, "oracle_pnl_usd": 4_000.0}
+    track.entries.append(extra)
+    you = scored["pnl_usd"] + extra["pnl_usd"]
+    for oracle, want in ((5_999.0, "n/a — not enough flow-reading edge yet ($9,999 of $10,000)"),
+                         (6_000.0, f"{math.floor(you / 10_000 * 100 + 0.5)}%")):  # Math.round
+        # Disciplined at zero so the pooled gap is exactly the oracles' scores: 4,000 + this.
+        scored.update(disciplined_pnl_usd=0.0, oracle_pnl_usd=oracle)
+        track.save(DirectoryStorage(folder))
+        rows, _ = track_table("\n".join(records.track_lines(track.aggregates(), counted=True)))
+        page, lt, errors = open_reveal(browser, folder, ids[0])
+        try:
+            assert page.text_content("#rv-capture-pooled") == want
+            page.click("#rv-tabs [data-rtab='track']")
+            assert page.text_content("#rv-track-pooled [data-ratio='pnl']") == want
+            shown = dict(page.eval_on_selector_all(
+                "#rv-track-gaps tbody tr", "rs => rs.map(r => [r.dataset.row, [...r.children].slice(1).map(c => c.textContent)])"))
+            assert all(cells[2] != "n/a" for cells in rows.values())
+            for name, cells in rows.items():
+                assert all(same(p, m) for p, m in zip(shown[name], cells, strict=True)), (name, shown[name], cells)
+            assert not errors, errors
+        finally:
+            page.close()
+            lt.close()
 
 
 def test_an_old_format_record_opens_in_the_reveal(browser):

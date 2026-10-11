@@ -29,7 +29,7 @@ import tornado.web
 import tornado.websocket
 
 from mm_game import records
-from mm_game.config import GameConfig, ScoringConfig
+from mm_game.config import GameConfig
 from mm_game.engine import Settings
 from mm_game.game import Game, fresh_seed
 from mm_game.host import Host, WallClock
@@ -104,7 +104,7 @@ class _Track(tornado.web.RequestHandler):
         track = TrackRecord.load(self.storage)
         self.set_header("Content-Type", "application/json")
         self.set_header("Cache-Control", "no-store")
-        self.write(records.dumps(track.message(ScoringConfig().capture_ratio_min_usd)))
+        self.write(records.dumps(track.message()))
 
 
 def make_reveal_app(records_dir: str) -> tornado.web.Application:

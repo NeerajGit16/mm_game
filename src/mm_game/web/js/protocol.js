@@ -304,8 +304,26 @@ export const V = 2;
  * @property {number} risk_adjusted_usd
  * @property {number} disciplined_pnl_usd
  * @property {number} oracle_pnl_usd
+ * @property {number} disciplined_risk_adjusted_usd
+ * @property {number} oracle_risk_adjusted_usd
+ * @property {number} you_minus_disciplined_pnl_usd
+ * @property {number} oracle_minus_disciplined_pnl_usd
+ * @property {number} you_minus_disciplined_risk_adjusted_usd
+ * @property {number} oracle_minus_disciplined_risk_adjusted_usd
  * @property {number | null} capture_ratio_pnl
  * @property {number | null} capture_ratio_risk_adjusted
+ */
+
+/**
+ * A gap to the disciplined bot over scored sessions: the sum, the mean per
+ * session and its standard error (null under two sessions).
+ * @typedef {{total_usd: number, mean_usd: number | null, se_usd: number | null}} Pooled
+ */
+
+/**
+ * One score pooled: your gap and the oracle's, and the pooled capture ratio
+ * (null until the oracle's pooled gap reaches the threshold).
+ * @typedef {{you_minus_disciplined: Pooled, oracle_minus_disciplined: Pooled, capture_ratio: number | null}} PooledScore
  */
 
 /**
@@ -314,8 +332,9 @@ export const V = 2;
  * @property {number} v
  * @property {"track"} type
  * @property {TrackEntry[]} entries
- * @property {{sessions: number, replays_excluded: number, pnl_usd: number | null, risk_adjusted_usd: number | null,
- *   pooled_capture_ratio_pnl: number | null, pooled_capture_ratio_risk_adjusted: number | null}} aggregates
+ * @property {{sessions: number, replays_excluded: number, pooled_min_gap_usd: number,
+ *   pnl_usd: number | null, risk_adjusted_usd: number | null,
+ *   pnl: PooledScore, risk_adjusted: PooledScore}} aggregates
  */
 
 /**

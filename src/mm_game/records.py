@@ -35,7 +35,7 @@ import hashlib
 import json
 import math
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -521,7 +521,48 @@ def _horizon(key: str) -> str:
     return key.replace("_", " ")
 
 
-def markdown_summary(record: dict[str, Any]) -> str:
+def pooled_ratio_text(ratio: float | None, gap_usd: float, threshold_usd: float, show: Callable[[float], str]) -> str:
+    """The pooled capture ratio, or why it is not shown yet."""
+    if ratio is not None:
+        return show(ratio)
+    return f"n/a — not enough flow-reading edge yet ({_usd(gap_usd)} of {_usd(threshold_usd)})"
+
+
+def track_lines(track: dict[str, Any], *, counted: bool) -> list[str]:
+    """The track record as it stands after this session: the pooled gaps to
+    the disciplined bot, mean per session and standard error, and the
+    pooled capture ratio once there is enough flow-reading edge to measure."""
+    n, replays = track["sessions"], track["replays_excluded"]
+    lines = [
+        "## Track record",
+        "",
+        ("After this session" if counted else "This practice replay is not counted;")
+        + f" the track record holds {n} scored session{'s' if n != 1 else ''}"
+        + (f" ({replays} practice replay{'s' if replays != 1 else ''} left out)" if replays else "")
+        + ".",
+        "",
+        "| Against the disciplined bot | Pooled | Mean per session | Standard error |",
+        "|---|---|---|---|",
+    ]
+    for key, label in (("pnl", "P&L"), ("risk_adjusted", "risk-adjusted")):
+        for who, name in (("you_minus_disciplined", "You"), ("oracle_minus_disciplined", "Flow oracle")):
+            p = track[key][who]
+            lines.append(f"| {name}, {label} | {_signed(p['total_usd'])} | {_signed(p['mean_usd'])} | {_usd(p['se_usd'])} |")
+    ratio = {
+        key: pooled_ratio_text(
+            track[key]["capture_ratio"], track[key]["oracle_minus_disciplined"]["total_usd"],
+            track["pooled_min_gap_usd"], _ratio,
+        )
+        for key in ("pnl", "risk_adjusted")
+    }
+    lines += ["", f"Pooled capture ratio: P&L {ratio['pnl']}; risk-adjusted {ratio['risk_adjusted']}.", ""]
+    return lines
+
+
+def markdown_summary(record: dict[str, Any], track: dict[str, Any] | None = None) -> str:
+    """The session in markdown. ``track`` is the track record's aggregates
+    after this session was added; without it the track-record section is
+    left out."""
     h, s, dec, d = record["header"], record["scores"], record["decomposition"], record["diagnostics"]
     bots = record["benchmarks"]
     cfg = h["config"]
@@ -561,6 +602,8 @@ def markdown_summary(record: dict[str, Any]) -> str:
         f"on P&L, {_usd(cr['risk_adjusted']['oracle_minus_disciplined_usd'])} risk-adjusted).",
         "",
     ]
+    if track is not None:
+        lines += track_lines(track, counted=not flags["replay_of_played_seed"])
 
     # -- Decomposition --------------------------------------------------------
     lines += [
@@ -772,33 +815,80 @@ class TrackRecord:
         self.entries.append(entry)
         return entry
 
-    def message(self, min_gap_usd: float) -> dict[str, Any]:
+    def message(self) -> dict[str, Any]:
         """The track record for the reveal's Track record tab: every session,
-        replays included and flagged, and the aggregates over scored ones."""
-        return {"v": PROTOCOL_VERSION, "type": "track", "entries": list(self.entries),
-                "aggregates": self.aggregates(min_gap_usd)}
+        replays included and flagged, each with its gaps to the disciplined
+        bot, and the aggregates over scored ones."""
+        return {"v": PROTOCOL_VERSION, "type": "track", "entries": [{**e, **gaps(e)} for e in self.entries],
+                "aggregates": self.aggregates()}
 
-    def aggregates(self, min_gap_usd: float) -> dict[str, Any]:
-        """Over scored sessions only -- replays excluded: mean scores, and
-        the capture ratio pooled across sessions, sum(you - disciplined) /
-        sum(oracle - disciplined). Pooled rather than a mean of per-session
-        ratios: one session's oracle-minus-disciplined gap is dominated by
-        where the two inventories happened to be at the prints, and a mean
-        of ratios of noisy denominators is not a measurement. n/a until the
-        pooled gap clears the per-session threshold."""
+    def aggregates(self) -> dict[str, Any]:
+        """Over scored sessions only -- replays excluded, and nothing else:
+        mean scores; on each score, your gap to the disciplined bot and the
+        oracle's, pooled (summed), as a mean per session and its standard
+        error; and the capture ratio pooled across sessions, sum(you -
+        disciplined) / sum(oracle - disciplined).
+
+        Pooled rather than a mean of per-session ratios: one session's
+        oracle-minus-disciplined gap is dominated by where the two
+        inventories happened to be at the prints, and a mean of ratios of
+        noisy denominators is not a measurement. Sessions the oracle lost
+        are pooled too -- leaving them out would bias the ratio. The ratio
+        is n/a until the pooled oracle gap reaches ``POOLED_MIN_GAP_USD``."""
         scored = [e for e in self.entries if not e["replay_of_played_seed"]]
-        out: dict[str, Any] = {"sessions": len(scored), "replays_excluded": len(self.entries) - len(scored)}
+        out: dict[str, Any] = {
+            "sessions": len(scored),
+            "replays_excluded": len(self.entries) - len(scored),
+            "pooled_min_gap_usd": POOLED_MIN_GAP_USD,
+        }
         for key in ("pnl_usd", "risk_adjusted_usd"):
             xs = [e[key] for e in scored]
             out[key] = float(np.mean(xs)) if xs else None
-        for key, you, disc, orc in (
-            ("pooled_capture_ratio_pnl", "pnl_usd", "disciplined_pnl_usd", "oracle_pnl_usd"),
-            ("pooled_capture_ratio_risk_adjusted", "risk_adjusted_usd", "disciplined_risk_adjusted_usd", "oracle_risk_adjusted_usd"),
-        ):
-            out[key] = sc.capture_ratio(
-                sum(e[you] for e in scored), sum(e[disc] for e in scored), sum(e[orc] for e in scored), min_gap_usd
-            )
+        for key, you, disc, orc in _TRACK_SCORES:
+            out[key] = {
+                "you_minus_disciplined": _pooled([e[you] - e[disc] for e in scored]),
+                "oracle_minus_disciplined": _pooled([e[orc] - e[disc] for e in scored]),
+                "capture_ratio": sc.capture_ratio(
+                    sum(e[you] for e in scored), sum(e[disc] for e in scored), sum(e[orc] for e in scored),
+                    POOLED_MIN_GAP_USD,
+                ),
+            }
         return out
+
+
+# The pooled capture ratio is shown only once the oracle's edge over the
+# disciplined bot, summed over scored sessions, is at least this: below it
+# the pooled ratio is still a ratio of noise terms (four sessions once gave
+# -624% on a $2,541 pooled gap). A property of the pool, not of a session,
+# so not in ScoringConfig; per-session ratios keep its smaller floor.
+POOLED_MIN_GAP_USD = 10_000.0
+
+# Each score a track entry carries: (key, yours, the disciplined bot's, the oracle's).
+_TRACK_SCORES = (
+    ("pnl", "pnl_usd", "disciplined_pnl_usd", "oracle_pnl_usd"),
+    ("risk_adjusted", "risk_adjusted_usd", "disciplined_risk_adjusted_usd", "oracle_risk_adjusted_usd"),
+)
+
+
+def gaps(entry: dict[str, Any]) -> dict[str, float]:
+    """One session's distance from the disciplined bot on each score: yours
+    and the flow oracle's."""
+    out = {}
+    for key, you, disc, orc in _TRACK_SCORES:
+        out[f"you_minus_disciplined_{key}_usd"] = entry[you] - entry[disc]
+        out[f"oracle_minus_disciplined_{key}_usd"] = entry[orc] - entry[disc]
+    return out
+
+
+def _pooled(xs: list[float]) -> dict[str, float | None]:
+    """Sum, mean per session, and the standard error of that mean (sample
+    standard deviation over sqrt(n); n/a for fewer than two sessions)."""
+    n = len(xs)
+    return {
+        "total_usd": float(sum(xs)),
+        "mean_usd": float(np.mean(xs)) if n else None,
+        "se_usd": float(np.std(xs, ddof=1) / np.sqrt(n)) if n >= 2 else None,
+    }
 
 
 # Track-record format version -> reader of its entries. Add, never remove.
