@@ -196,6 +196,46 @@ def test_client_table_adds_up_to_the_decomposition(cfg, seed, bot, quit_at):
     assert sum(c["lots"] for c in clients) == sum(abs(t.quantity) for t in fills)
 
 
+@pytest.mark.parametrize("cfg,seed,bot,quit_at", SESSIONS)
+def test_client_markouts_split_by_ticket_not_by_client_type(cfg, seed, bot, quit_at):
+    """Each client's mark-outs split into its informed fills and the rest by
+    the RFQ, not the client: informed + other is the client's total at every
+    horizon; summed over clients, the informed part is the decomposition's
+    informed-print plus informed-move lines and the rest its uninformed line.
+    Its informed RFQs are those inside its information window, counted among
+    the RFQs you were shown, and its informed fills are the ones you filled.
+    An informed client's uninformed RFQs land in "other". A split by client
+    type would charge an informed client's column for flow that knew nothing
+    -- the mistake that made one session look picked off with no informed
+    fills at all."""
+    w, s = played(cfg, seed, bot, quit_at)
+    dec = decompose(cfg, w, s.book.trades)
+    clients = scoring.diagnostics(w, s.log, s.book.trades)["clients"]
+    rfqs = w.schedule.rfqs
+    informed = lambda q: q.informed and q.informed_about is not None  # noqa: E731
+    shown = [e.data["rfq"]["ordinal"] for e in s.log.of(Kind.RFQ_ARRIVED)]
+    fills = [t for t in s.book.trades if t.source is Source.CLIENT]
+    for cid, c in clients.items():
+        mine = [o for o in shown if rfqs[o].client_id == int(cid)]
+        assert c["informed_rfqs"] == sum(informed(rfqs[o]) for o in mine)
+        assert c["informed_fills"] == sum(informed(rfqs[t.rfq_ordinal]) for t in fills if rfqs[t.rfq_ordinal].client_id == int(cid))
+        for key in ("60s", "300s", scoring.NEXT_EVENT):
+            split = c["markouts_by_fill_usd"]
+            assert split["informed"][key] + split["other"][key] == pytest.approx(c["markouts_usd"][key], abs=1e-6), (cid, key)
+            if c["informed_fills"] == 0:
+                assert split["informed"][key] == 0.0
+    for key in ("60s", "300s", scoring.NEXT_EVENT):
+        by_type = dec["by_horizon"][key]["adverse_selection_by_type_usd"]
+        got = sum(c["markouts_by_fill_usd"]["informed"][key] for c in clients.values())
+        assert got == pytest.approx(by_type["informed_print"] + by_type["informed_move"], abs=0.005), key
+        got = sum(c["markouts_by_fill_usd"]["other"][key] for c in clients.values())
+        assert got == pytest.approx(by_type["uninformed"], abs=0.005), key
+    # The case the split exists for: an informed client asking outside its window.
+    outside = [t for t in fills if w.schedule.clients[rfqs[t.rfq_ordinal].client_id].informed_type and not informed(rfqs[t.rfq_ordinal])]
+    if bot == "scripted" and quit_at is None:
+        assert outside, "the full scripted session should include an informed client's uninformed fill"
+
+
 # --------------------------------------------------------------------------
 # The risk penalty
 # --------------------------------------------------------------------------

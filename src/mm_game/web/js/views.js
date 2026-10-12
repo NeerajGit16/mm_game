@@ -143,14 +143,14 @@ function renderHistory(store, ticket) {
   const last = c.last_trade_step === null ? "—" : ago((store.state.step - c.last_trade_step) * store.dt);
   const lines = c.recent.map((r) => recentLine(store, r)).join("") || '<div class="muted">no history yet</div>';
   return `
-    <div class="lbl" style="margin-bottom:6px">Your history with client ${c.client_id} (marked against the screen)</div>
+    <div class="lbl" style="margin-bottom:4px">Your history with client ${c.client_id} (marked against the screen)</div>
     <div class="hist-grid">
       <div><div class="lbl">RFQs</div><div class="v">${c.rfqs}</div></div>
       <div><div class="lbl">Traded</div><div class="v">${c.traded}</div></div>
-      <div><div class="lbl">Your net</div><div class="v">${signedInt(c.net)}</div></div>
+      <div><div class="lbl">Your net (+ = you bought)</div><div class="v">${signedInt(c.net)}</div></div>
       <div><div class="lbl">Last trade</div><div class="v">${last}</div></div>
-      <div style="grid-column: span 2"><div class="lbl">60s mark-out / lot</div><div class="v ${tone(m["60s"])}">${bp(m["60s"])}</div></div>
-      <div style="grid-column: span 2"><div class="lbl">300s mark-out / lot</div><div class="v ${tone(m["300s"])}">${bp(m["300s"])}</div></div>
+      <div style="grid-column: span 2"><div class="lbl">Mark-out 60s / lot</div><div class="v ${tone(m["60s"])}">${bp(m["60s"])}</div></div>
+      <div style="grid-column: span 2"><div class="lbl">Mark-out 300s / lot</div><div class="v ${tone(m["300s"])}">${bp(m["300s"])}</div></div>
     </div>
     <div class="hist-lines">${lines}</div>`;
 }
@@ -172,6 +172,7 @@ function renderTicket(store, controls) {
     set("t-category", `· ${longCategory(t.category)}`);
     set("t-size", `${t.size} lot${t.size === 1 ? "" : "s"}`);
     set("t-type", t.one_way ? (t.side === 1 ? "client buys" : "client sells") : "two-way");
+    setClass($("t-type"), t.one_way ? "t-side" : "t-side two-way");
     set("t-comp", t.in_comp === 0 ? "in comp: none" : `in comp: ${t.in_comp} dealer${t.in_comp > 1 ? "s" : ""}`);
     const key = `${t.ordinal}:${store.desk ? store.desk.step : 0}`;
     if (lastTicketKey !== key) {
@@ -299,7 +300,7 @@ function renderRisk(store) {
   $("pr-marker").style.left = `calc(${Math.min(Math.abs(pos) / 100, 1) * 100}% - 1px)`;
 
   const costs = st.venue.quotes.map((q) => `${q.size}: ${q.cost_bp_per_lot.toFixed(2)}`).join(" · ");
-  set("venue-cost", `now ${costs} bp/lot${st.venue.near_print ? " · wider: near a print" : " · wider near prints"}`);
+  set("broker-cost", `now ${costs} bp/lot${st.venue.near_print ? " · wider: near a print" : " · wider near prints"}`);
 
   const h = store.lastHedge;
   if (h) {

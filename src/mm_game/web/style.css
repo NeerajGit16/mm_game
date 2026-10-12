@@ -82,7 +82,7 @@ kbd {
 
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; min-height: 0; display: flex; flex-direction: column; }
 .panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 6px; }
-.panel-head .title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; }
+.panel-head .title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; white-space: nowrap; }
 .legend { color: var(--muted); font-size: 12px; }
 .legend span { margin-left: 8px; }
 .chart-panel { flex: 3; }
@@ -106,13 +106,21 @@ table.grid tr.highlight td { background: #1d2530; }
 #ticket { flex: 0 0 auto; }
 #ticket.live { border-color: #3a4552; }
 .empty { color: var(--muted); padding: 18px 4px; }
-.client-line { display: flex; align-items: baseline; gap: 8px; margin: 2px 0 6px; }
-.client-name { font-size: 22px; font-weight: 600; }
+/* The size, and a one-way client's side, are the biggest thing on the ticket:
+   as large as the prices you will quote. */
+.t-ask { display: flex; align-items: baseline; gap: 14px; margin: 2px 0 4px; }
+.t-size { font-size: 26px; font-weight: 700; color: var(--ink); }
+.t-side { font-size: 26px; font-weight: 700; color: var(--accent); }
+.t-side.two-way { font-size: 14px; font-weight: 600; color: var(--muted); }
+.client-line { display: flex; align-items: baseline; gap: 8px; margin: 0 0 4px; }
+.client-name { font-size: 15px; font-weight: 600; }
 .subpanel { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin-top: 8px; background: #0f1317; }
-.hist-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px 10px; }
-.hist-grid .v { font: 600 15px var(--mono); }
-.hist-lines { margin-top: 6px; font: 12px var(--mono); }
-.hist-lines div { padding: 2px 0; color: #c9ced4; }
+/* The client history is context, not the decision: smaller and muted. */
+.subpanel.history { padding: 6px 10px; border-color: #1b2128; color: var(--muted); font-size: 11px; }
+.hist-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 2px 10px; }
+.hist-grid .v { font: 600 12px var(--mono); color: #aab2bb; }
+.hist-lines { margin-top: 4px; font: 11px var(--mono); }
+.hist-lines div { padding: 1px 0; color: var(--muted); }
 .quote-head { display: flex; justify-content: space-between; gap: 10px; }
 .quote-sides { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
 .side { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: var(--panel-2); }
@@ -173,6 +181,18 @@ table.grid tr.highlight td { background: #1d2530; }
   position: fixed; inset: 0; z-index: 40; display: flex; align-items: center; justify-content: center;
   background: #0a0c0ecc; backdrop-filter: blur(2px);
 }
+/* (i): what a table's columns mean. */
+.info {
+  display: inline-flex; align-items: center; justify-content: center; width: 17px; height: 17px; margin-left: 6px;
+  border: 1px solid #3a4552; border-radius: 50%; background: var(--panel-2); color: var(--muted); cursor: pointer;
+  font: italic 700 11px Georgia, serif; text-transform: none; letter-spacing: 0; vertical-align: 1px; padding: 0;
+}
+.info:hover { color: var(--accent); border-color: var(--accent); }
+#glossary { z-index: 45; }
+.card.glossary-card { max-width: 820px; max-height: 88vh; overflow: auto; }
+.gl-list { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 10px 0 16px; }
+.gl-list dt { font-weight: 700; color: var(--ink); white-space: nowrap; }
+.gl-list dd { margin: 0; color: #c9ced4; line-height: 1.45; }
 .cover[hidden] { display: none; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 24px 28px; max-width: 760px; }
 .card h1 { margin: 0 0 10px; font-size: 22px; }
@@ -221,21 +241,31 @@ table.sortable th.sorted { color: var(--ink); }
 .handbook .locked { color: var(--accent); border: 1px dashed var(--accent); border-radius: 8px; padding: 8px 12px; display: inline-block; }
 
 /* -- the reveal ------------------------------------------------------------- */
-#reveal { display: grid; grid-template-rows: auto auto 1fr; height: 100vh; padding: 10px; row-gap: 8px; min-width: 1280px; }
+/* The whole page scrolls; nothing scrolls inside a card. The left column
+   (the charts and the clients) fits the window and stays in view while the
+   right column's cards, at their natural height, scroll past it. */
+#reveal { display: flex; flex-direction: column; gap: 8px; padding: 10px; min-width: 1280px; }
 #reveal[hidden] { display: none; }
 .rv-head { display: flex; align-items: baseline; gap: 18px; padding: 8px 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
 .rv-head h1 { margin: 0; font-size: 18px; }
 .rv-saved { margin-left: auto; }
 .rv-tabs { display: flex; gap: 2px; }
-.rv-body { min-height: 0; }
 .rv-body[hidden] { display: none; }
-.rv-summary { display: grid; grid-template-columns: minmax(0, 1fr) 560px; gap: 8px; }
-.rv-left, .rv-right { display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow: auto; }
+.rv-summary { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 8px; align-items: start; }
+.rv-left { position: sticky; top: 10px; display: flex; flex-direction: column; gap: 8px; }
+.rv-right { display: flex; flex-direction: column; gap: 8px; }
+#reveal .panel { min-height: auto; }
 #rv-clients, #rv-tickets, #rv-track { display: flex; flex-direction: column; }
 #rv-clients[hidden], #rv-tickets[hidden], #rv-track[hidden] { display: none; }
+#reveal .scroll { overflow-x: auto; overflow-y: visible; }
 .rv-chart-panel { flex: 0 0 auto; }
-#rv-chart { height: 380px; }
-#rv-pos { height: 170px; }
+#rv-chart { height: 300px; flex: none; }
+#rv-pos { height: 150px; flex: none; }
+table.grid.wrap td, table.grid.wrap th { white-space: normal; }
+table.grid.wrap td:first-child { white-space: nowrap; }
+#reveal table.grid tr.group th { position: static; text-align: center; border-bottom: none; padding-bottom: 0; }
+#reveal table.grid tr.group th[colspan]:not(:empty) { border-bottom: 1px solid var(--line); }
+#reveal table.grid th { position: static; }
 .rv-controls { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; font-size: 12px; }
 .toggle { cursor: pointer; user-select: none; }
 .toggle input { vertical-align: -2px; margin-right: 6px; }
@@ -247,23 +277,23 @@ table.sortable th.sorted { color: var(--ink); }
 .ring { color: var(--accent); margin: 0 3px 0 10px; }
 .hedge-sq { color: #c9ced4; margin: 0 3px 0 10px; }
 .disc-mark, .disc-line { color: #9aa3ad; }
-.oracle-mark, .oracle-line { color: #b48cff; }
+.oracle-mark, .oracle-line { color: #c39bff; }
 .you-line { color: var(--buy); }
 .rv-text { color: #c9ced4; line-height: 1.5; margin: 8px 0; }
-.rv-rules ul { margin: 6px 0 0; padding-left: 18px; }
+.rv-rules ul { margin: 8px 0 0; padding-left: 18px; }
 .rv-rules li { color: #c9ced4; line-height: 1.45; margin-bottom: 3px; font-size: 12px; }
-.rv-rules summary { cursor: pointer; }
+.rv-rules li.lbl { list-style: none; margin-left: -18px; }
+.rv-rules summary { cursor: pointer; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; }
+.rv-text { overflow-wrap: anywhere; }
 .switch { display: inline-flex; gap: 2px; }
 .switch .btn { padding: 2px 8px; font-size: 12px; }
 #rv-breakdown td:first-child { font-family: var(--sans); }
 table.grid.rv-track-gaps { width: auto; min-width: 560px; align-self: flex-start; margin-bottom: 10px; }
 .rv-track-gaps td:first-child { font-family: var(--sans); }
-#rv-track-table tr.group th { position: static; text-align: center; border-bottom: none; padding-bottom: 0; }
-#rv-track-table tr.group th[colspan="6"], #rv-track-table tr.group th[colspan="4"] { border-bottom: 1px solid var(--line); }
 #rv-breakdown tr.total td { font-weight: 700; border-top: 1px solid var(--line); }
 .moment { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; background: var(--panel-2); cursor: pointer; }
 .moment:hover { border-color: #3a4552; }
-.moment.active { border-color: var(--accent); }
+.moment.active { border-color: #7ef0c8; box-shadow: 0 0 0 1px #7ef0c8 inset; }
 .moment-head { display: flex; justify-content: space-between; font-weight: 600; margin-bottom: 4px; }
 .moment p { margin: 0; color: #c9ced4; line-height: 1.45; }
 .rv-tip {

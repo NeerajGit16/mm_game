@@ -9,19 +9,30 @@
 //
 // Below it, your position against the disciplined bot and the flow oracle
 // on the same time axis, zoomed with it.
+//
+// A moment, once clicked, is marked on both charts: a labelled line at its
+// time -- at the print; at the ramp of a move, with its leak window
+// shaded; at a ticket, with that fill's marker highlighted.
 
 import { longCategory, mmss, money, price } from "./format.js";
 
 /** @typedef {import("./protocol.js").CoachingRecord} CoachingRecord */
 /** @typedef {import("./protocol.js").RevealFill} RevealFill */
+/** @typedef {import("./protocol.js").Moment} Moment */
 /** @typedef {uPlot} UPlot */
 /** @typedef {uPlot.Options} Options */
+
+/**
+ * A moment marked on the charts.
+ * @typedef {{kind: string, step: number, label: string, leak: [number, number] | null, rfq: number | null}} Marker
+ */
 
 const COLOR = {
   truth: "#f5f7fa", screen: "#6b737c", axis: "#8b95a1", grid: "#1f252c",
   buy: "#4ea1ff", sell: "#f39c3d", ring: "#f2cc4d", hedge: "#c9ced4", print: "#f2cc4d",
   runup: "rgba(170, 170, 70, 0.16)", move: "rgba(140, 100, 220, 0.24)", label: "#c9ced4",
-  you: "#4ea1ff", disciplined: "#9aa3ad", oracle: "#b48cff",
+  you: "#4ea1ff", disciplined: "#9aa3ad", oracle: "#c39bff",
+  marker: "#7ef0c8", leak: "rgba(126, 240, 200, 0.16)",
 };
 const FONT = "11px Consolas, monospace";
 const stepped = /** @type {NonNullable<typeof uPlot.paths.stepped>} */ (uPlot.paths.stepped);
@@ -124,9 +135,12 @@ export function createRevealCharts(chartEl, posEl, tipEl, record) {
   const clients = new Map(record.world.clients.map((c) => [c.client_id, c]));
   const state = {
     showBots: false,
-    drawn: { you: 0, bots: 0, rings: 0 },
+    drawn: { you: 0, bots: 0, rings: 0, highlighted: 0 },
     range: /** @type {[number, number] | null} */ (null),
     bands: /** @type {{kind: string, from_step: number, to_step: number}[]} */ ([]),
+    marker: /** @type {Marker | null} */ (null),
+    // Where the marker was last drawn, chart by chart, in steps.
+    markerDrawn: /** @type {{price: number | null, position: number | null}} */ ({ price: null, position: null }),
   };
   /** @type {Hit[]} */
   let hits = [];
@@ -205,6 +219,52 @@ export function createRevealCharts(chartEl, posEl, tipEl, record) {
     ctx.restore();
   }
 
+  /**
+   * The clicked moment: its leak window (a move), then a labelled line at
+   * its time. Drawn on both charts.
+   * @param {UPlot} u
+   * @param {"price" | "position"} which
+   */
+  function markerLayer(u, which) {
+    const m = state.marker;
+    if (!m) { state.markerDrawn[which] = null; return; }
+    const ctx = u.ctx;
+    const r = ratio();
+    const { left, top, width, height } = u.bbox;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(left, top, width, height);
+    ctx.clip();
+    if (m.leak) {
+      const x0 = u.valToPos(m.leak[0] * dt, "x", true);
+      const x1 = u.valToPos(m.leak[1] * dt, "x", true);
+      ctx.fillStyle = COLOR.leak;
+      ctx.fillRect(x0, top, Math.max(x1 - x0, 1), height);
+      if (which === "price") {
+        ctx.fillStyle = COLOR.marker;
+        ctx.font = `${11 * r}px Consolas, monospace`;
+        ctx.textAlign = "left";
+        ctx.fillText("leak", x0 + 4 * r, top + 30 * r);
+      }
+    }
+    const x = u.valToPos(m.step * dt, "x", true);
+    ctx.strokeStyle = COLOR.marker;
+    ctx.lineWidth = 2 * r;
+    ctx.setLineDash([]); // a series' dash must not leak into the mark
+    ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, top + height); ctx.stroke();
+    ctx.font = `bold ${12 * r}px Consolas, monospace`;
+    const text = `${m.label} · ${mmss(m.step * dt)}`;
+    const w = ctx.measureText(text).width + 10 * r;
+    const lx = Math.min(x + 4 * r, left + width - w);
+    ctx.fillStyle = "#0f1317";
+    ctx.fillRect(lx, top + 2 * r, w, 17 * r);
+    ctx.fillStyle = COLOR.marker;
+    ctx.textAlign = "left";
+    ctx.fillText(text, lx + 5 * r, top + 15 * r);
+    ctx.restore();
+    state.markerDrawn[which] = m.step;
+  }
+
   /** @param {RevealFill} f */
   function fillTip(f) {
     const when = mmss(f.step * dt);
@@ -218,7 +278,7 @@ export function createRevealCharts(chartEl, posEl, tipEl, record) {
       : "uninformed";
     return `<b>RFQ ${f.rfq_ordinal}</b> · ${when} · client ${f.client_id} (${c ? longCategory(c.category) : "?"}, ${who})`
       + `<br>you ${f.quantity > 0 ? "bought" : "sold"} ${Math.abs(f.quantity)} at ${price(f.price)}`
-      + `<br>edge against the truth ${money(f.edge_usd)} · through the next event ${money(/** @type {number} */ (f.ticket_usd))}`;
+      + `<br>edge against the truth ${money(f.edge_usd)} · through the next print/move ${money(/** @type {number} */ (f.ticket_usd))}`;
   }
 
   /** @param {UPlot} u */
@@ -227,7 +287,7 @@ export function createRevealCharts(chartEl, posEl, tipEl, record) {
     const r = ratio();
     const s = 6 * r;
     hits = [];
-    state.drawn = { you: 0, bots: 0, rings: 0 };
+    state.drawn = { you: 0, bots: 0, rings: 0, highlighted: 0 };
     ctx.save();
     ctx.beginPath();
     ctx.rect(u.bbox.left, u.bbox.top, u.bbox.width, u.bbox.height);
@@ -256,10 +316,17 @@ export function createRevealCharts(chartEl, posEl, tipEl, record) {
         ctx.beginPath(); ctx.arc(x, y, s * 1.9, 0, 2 * Math.PI); ctx.stroke();
         state.drawn.rings += 1;
       }
+      if (state.marker && state.marker.rfq !== null && f.source === "client" && f.rfq_ordinal === state.marker.rfq) {
+        ctx.strokeStyle = COLOR.marker;
+        ctx.lineWidth = 3 * r;
+        ctx.beginPath(); ctx.arc(x, y, s * 2.8, 0, 2 * Math.PI); ctx.stroke();
+        state.drawn.highlighted += 1;
+      }
       hits.push({ x: x / r, y: y / r, html: fillTip(f) });
       state.drawn.you += 1;
     }
     ctx.restore();
+    markerLayer(u, "price");
   }
 
   /** @param {UPlot} u */
@@ -322,6 +389,7 @@ export function createRevealCharts(chartEl, posEl, tipEl, record) {
       { stroke: COLOR.axis, font: FONT, grid: { stroke: COLOR.grid, width: 1 }, ticks: { stroke: COLOR.grid, width: 1 },
         values: (u, splits) => splits.map((v) => mmss(v)) },
       { stroke: COLOR.axis, font: FONT, size: 70, grid: { stroke: COLOR.grid, width: 1 }, ticks: { stroke: COLOR.grid, width: 1 },
+        label: "price", labelFont: FONT, labelSize: 16, labelGap: 0,
         values: (u, splits) => splits.map((v) => (v / 100).toFixed(4)) },
     ],
     series: [
@@ -339,6 +407,12 @@ export function createRevealCharts(chartEl, posEl, tipEl, record) {
   const chart = new uPlot(chartOpts, [xs, screen, truth], chartEl);
 
   const positions = positionPaths(record);
+  // The y axis fits the three positions, zero included, with a little room:
+  // a scale set by the largest of them would flatten the other two.
+  const held = positions.slice(1).flat();
+  const lo = Math.min(0, ...held);
+  const hi = Math.max(0, ...held);
+  const pad = Math.max(5, (hi - lo) * 0.08);
   /** @type {Options} */
   const posOpts = {
     ...size(posEl, 120),
@@ -346,42 +420,71 @@ export function createRevealCharts(chartEl, posEl, tipEl, record) {
     cursor: { drag: { x: true, y: false }, points: { show: false }, sync: { key: "reveal" } },
     scales: {
       x: { time: false },
-      y: {
-        range: (u, min, max) => {
-          const m = Math.max(Math.abs(min ?? 0), Math.abs(max ?? 0), 10);
-          return [-m * 1.1, m * 1.1];
-        },
-      },
+      y: { range: () => [lo - pad, hi + pad] },
     },
     axes: [
       { stroke: COLOR.axis, font: FONT, grid: { stroke: COLOR.grid, width: 1 }, ticks: { stroke: COLOR.grid, width: 1 },
         values: (u, splits) => splits.map((v) => mmss(v)) },
-      { stroke: COLOR.axis, font: FONT, size: 70, space: 16, grid: { stroke: COLOR.grid, width: 1 }, ticks: { stroke: COLOR.grid, width: 1 },
-        values: (u, splits) => splits.map((v) => String(Math.round(v))) },
+      { stroke: COLOR.axis, font: FONT, size: 70, space: 18, grid: { stroke: COLOR.grid, width: 1 }, ticks: { stroke: COLOR.grid, width: 1 },
+        label: "lots (+ long)", labelFont: FONT, labelSize: 16, labelGap: 0,
+        values: (u, splits) => splits.map((v) => (v > 0 ? `+${Math.round(v)}` : String(Math.round(v)))) },
     ],
     series: [
       {},
-      { label: "you", stroke: COLOR.you, width: 2, paths: stepped({ align: 1 }), points: { show: false } },
-      { label: "disciplined bot", stroke: COLOR.disciplined, width: 1.5, dash: [5, 4], paths: stepped({ align: 1 }), points: { show: false } },
-      { label: "flow oracle", stroke: COLOR.oracle, width: 1.5, paths: stepped({ align: 1 }), points: { show: false } },
+      { label: "you", stroke: COLOR.you, width: 2.5, paths: stepped({ align: 1 }), points: { show: false } },
+      { label: "disciplined bot", stroke: COLOR.disciplined, width: 1.75, dash: [8, 5], paths: stepped({ align: 1 }), points: { show: false } },
+      { label: "flow oracle", stroke: COLOR.oracle, width: 2, dash: [2, 3], paths: stepped({ align: 1 }), points: { show: false } },
     ],
     hooks: {
       drawClear: [(u) => bands(u, false)],
-      draw: [(u) => prints(u, false)],
+      draw: [(u) => { prints(u, false); markerLayer(u, "position"); }],
       setScale: [(u, key) => { if (key === "x") follow(u, chart); }],
     },
   };
   pos = new uPlot(posOpts, /** @type {uPlot.AlignedData} */ (positions), posEl);
   chartEl.addEventListener("mouseleave", () => { tipEl.hidden = true; });
 
-  for (const [u, el, h] of /** @type {[UPlot, HTMLElement, number][]} */ ([[chart, chartEl, 300], [pos, posEl, 120]])) {
+  for (const [u, el, h] of /** @type {[UPlot, HTMLElement, number][]} */ ([[chart, chartEl, 200], [pos, posEl, 100]])) {
     new ResizeObserver(() => u.setSize(size(el, h))).observe(el);
   }
+  const full = /** @type {[number, number]} */ ([xs[0], xs[xs.length - 1]]);
+  const posChart = pos;
+  // For the tests: the position axis as drawn, and how each line is drawn.
+  const posState = {
+    axisLabel: String((posOpts.axes ?? [])[1]?.label ?? ""),
+    get range() { return [posChart.scales.y.min, posChart.scales.y.max]; },
+    lines: (posOpts.series ?? []).slice(1).map((s) => ({ stroke: String(s.stroke), dash: (s.dash ?? []).join(","), width: s.width })),
+  };
 
   return {
     state,
+    posState,
+    /** The whole session's time range, as the charts open. */
+    full,
     /** @param {boolean} on */
     showBots(on) { state.showBots = on; chart.redraw(false, false); },
+    /**
+     * Mark a moment on both charts, or clear the mark.
+     * @param {Moment | null} m
+     */
+    mark(m) {
+      if (!m) state.marker = null;
+      else if (m.kind === "print") {
+        const p = rv.prints.find((q) => q.index === m.index);
+        state.marker = { kind: "print", step: p ? p.step : m.step, label: `print ${m.index + 1}`, leak: null, rfq: null };
+      } else if (m.kind === "move") {
+        const mv = rv.moves.find((q) => q.index === m.index);
+        state.marker = mv
+          ? { kind: "move", step: mv.start_step, label: `move ${m.index + 1} · ramp`, leak: [mv.inform_step, mv.start_step], rfq: null }
+          : { kind: "move", step: m.step, label: `move ${m.index + 1}`, leak: null, rfq: null };
+      } else {
+        state.marker = { kind: "ticket", step: m.step, label: `RFQ ${m.index}`, leak: null, rfq: m.index };
+      }
+      chart.redraw(false, false);
+      posChart.redraw(false, false);
+    },
+    /** Back to the whole session on both charts. */
+    reset() { chart.setScale("x", { min: full[0], max: full[1] }); },
     /**
      * Zoom both charts to a window of the session, in steps.
      * @param {number} fromStep

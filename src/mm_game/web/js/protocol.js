@@ -179,6 +179,14 @@ export const V = 2;
  * @property {HandbookPart[]} parts
  */
 
+/** @typedef {{label: string, meaning: string}} GlossaryEntry */
+/** @typedef {{title: string, intro: string, entries: GlossaryEntry[]}} GlossaryTable */
+/**
+ * What every column means, served at /glossary: one table per (i) panel,
+ * keyed by where it appears.
+ * @typedef {{v: number, type: "glossary", tables: Record<string, GlossaryTable>}} GlossaryMsg
+ */
+
 /**
  * @typedef {Object} ErrorMsg
  * @property {number} v
@@ -247,11 +255,14 @@ export const V = 2;
  * @property {string} category
  * @property {boolean} informed_type
  * @property {number} rfqs
+ * @property {number} informed_rfqs  RFQs inside the client's information window
  * @property {number} quoted
  * @property {number} won
+ * @property {number} informed_fills  of those informed RFQs, the ones you filled
  * @property {number} lots
  * @property {number} net_lots
  * @property {Record<string, number>} markouts_usd
+ * @property {{informed: Record<string, number>, other: Record<string, number>}} markouts_by_fill_usd
  * @property {{kind: string, index: number, signal_direction: number, actual_direction: number, right: boolean}[]} informed_about
  */
 
@@ -261,7 +272,7 @@ export const V = 2;
  * @property {number} step
  * @property {boolean} shown
  * @property {{bid: number | null, ask: number | null, by: string} | null} action
- * @property {{outcome: string, side: Side | null, price: number | null, cover: number | null, quantity: number} | null} outcome
+ * @property {{outcome: string, side: Side | null, price: number | null, cover: number | null, quantity: number, position_after: number} | null} outcome
  * @property {{side: Side, informed: boolean, signal_bp: number | null, informed_about: {kind: string, index: number} | null,
  *   markouts: Record<string, {pnl_bp: number | null, truncated?: boolean}> | null}} hidden
  */

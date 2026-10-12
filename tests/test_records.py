@@ -400,9 +400,12 @@ def test_summary_reveals_moves_and_every_client():
     assert any(m["informed_rfqs"] for m in moves) and "foretold by RFQ" in summary
     table = [l for l in summary.splitlines() if l.startswith("| ") and l.split("|")[1].strip().isdigit()]
     assert len(table) >= cfg.n_clients
-    assert "| Client | Category | True type |" in summary
-    assert "| Your net lots | 60s | 300s | Next event |" in summary
-    assert "| | 10s | 60s | 300s | next event |" in summary
+    assert "| Client | Category | True type | RFQs | Informed RFQs (filled) |" in summary
+    assert (
+        "| Lots traded (gross) | Your net (+ = you bought) | Mark-out 60s | Mark-out 300s | "
+        "Mark-out to next print/move, informed fills | Mark-out to next print/move, other fills |"
+    ) in summary
+    assert "| | Mark-out 10s | Mark-out 60s | Mark-out 300s | Mark-out to next print/move |" in summary
 
 
 def test_reveal_is_sent_once_and_only_after_the_end(drill_game):

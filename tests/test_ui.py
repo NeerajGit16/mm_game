@@ -368,6 +368,116 @@ def test_the_calendar_and_log_show_every_event_in_order_and_filter_by_kind(play)
     play.wait(f"document.querySelectorAll('#log-table tbody tr').length === {len(seqs)}")
 
 
+FONT_PX = "(sel) => parseFloat(getComputedStyle(document.querySelector(sel)).fontSize)"
+
+
+@pytest.mark.parametrize("play", [21], indirect=True)  # a one-way ticket first, two-way ones after
+def test_the_rfq_size_is_the_biggest_thing_on_the_ticket(play):
+    """On every ticket the size -- and, one-way, the client's side -- is set
+    as large as the prices you will quote and larger than anything else on
+    it; the client's history below is smaller and muted. A ticket where the
+    history shouted and the size whispered is how a 77-lot RFQ gets priced
+    like a 7."""
+    play.press("Space")
+    last, seen = -1, set()
+    for _ in range(12):
+        t = next_ticket(play, last)
+        last = t["ticket"]["ordinal"]
+        size = play.page.evaluate(FONT_PX, "#t-size")
+        assert size >= play.page.evaluate(FONT_PX, "#q-bid") and size >= 24
+        others = play.page.evaluate("""[...document.querySelectorAll('#ticket *')]
+            .filter(e => e.offsetParent && e.children.length === 0 && e.textContent.trim()
+                    && !e.closest('#t-size, #t-type, .quote-sides'))
+            .map(e => parseFloat(getComputedStyle(e).fontSize))""")
+        assert max(others) < size
+        side = play.page.evaluate(FONT_PX, "#t-type")
+        if t["ticket"]["one_way"]:
+            assert side == size
+            seen.add("one-way")
+        else:
+            assert side < size
+            seen.add("two-way")
+        history = play.page.evaluate(FONT_PX, "#t-history")
+        colour = play.js("getComputedStyle(document.getElementById('t-history')).color")
+        assert history < 13 and colour == "rgb(139, 149, 161)"  # small, and the muted grey
+        if seen == {"one-way", "two-way"}:
+            break
+        play.press("p")
+    assert seen == {"one-way", "two-way"}
+
+
+def test_an_info_panel_explains_a_table_and_pauses_the_clock(play):
+    """During play, (i) on the P&L tab opens what each column means -- the
+    server's definitions, the same summary.md prints -- and pauses the clock
+    like ?; while it is open no key trades; Esc closes it and the clock
+    stays paused. An explainer that let the clock run would cost the RFQ
+    that arrived while you read."""
+    play.press("Space")
+    play.wait("window.mm.store.begun && !window.mm.store.state.clock.paused")
+    play.press("Tab")
+    play.wait("!document.getElementById('tab-pnl').hidden")
+    play.page.click("#tab-pnl [data-info='play.pnl']")
+    play.wait("!document.getElementById('glossary').hidden")
+    play.wait_events("paused", 1)
+    play.wait("window.mm.store.state.clock.paused")
+    tables = play.js("window.mmGlossary.tables()")
+    shown = play.js("[...document.querySelectorAll('#gl-list dt')].map(d => d.textContent)")
+    assert shown == [e["label"] for e in tables["play.pnl"]["entries"]]
+    assert "Edge" in shown and "Move since" in shown
+    play.press("w")  # swallowed while the panel is open
+    play.press("Escape")
+    play.wait("document.getElementById('glossary').hidden")
+    assert play.events("hedge_executed") == []
+    assert play.js("window.mm.store.state.clock.paused") is True
+    play.page.click("#tab-pnl [data-info='play.pnl_tiles']")
+    play.wait("!document.getElementById('glossary').hidden")
+    play.page.click("#gl-close")
+    play.wait("document.getElementById('glossary').hidden")
+    assert len(play.events("paused")) == 1  # already paused: not paused twice
+
+
+def test_every_column_header_on_the_play_screen_has_a_definition(play):
+    """Every table on the play screen -- blotter, P&L tiles and ticket by
+    ticket, the Clients tab, the roster, the calendar and the log -- has an
+    (i), and each of its headers is defined in its glossary table. A column
+    added to the page without a definition fails here."""
+    play.wait("window.mmGlossary.tables()")
+    tables = play.js("window.mmGlossary.tables()")
+    found = play.js("""[...document.querySelectorAll('#app [data-glossary]')].map(t => [
+        t.dataset.glossary,
+        [...t.querySelectorAll('thead th, .tile .lbl')].map(h => h.textContent.trim()).filter(Boolean)])""")
+    keys = {k for k, _ in found}
+    assert keys == {"play.blotter", "play.pnl_tiles", "play.pnl", "play.clients", "play.roster", "play.calendar", "play.log"}
+    for key, labels in found:
+        defined = {e["label"] for e in tables[key]["entries"]}
+        assert labels and set(labels) <= defined, (key, set(labels) - defined)
+    infos = play.js("[...document.querySelectorAll('#app [data-info]')].map(b => b.dataset.info)")
+    assert set(infos) == keys
+
+
+def test_no_text_on_the_play_screen_says_venue(play):
+    """After quotes and hedges, every tab, the risk strip, the handbook and
+    every (i) panel call it the broker -- a hedge's row in the P&L table
+    included. The snapshot's ``venue`` field keeps its name; the words do not."""
+    play_some(play, 5, hedge_every=2)
+    texts = []
+    for _ in range(4):
+        texts.append(play.page.inner_text("#app"))
+        play.press("Tab")
+    play.press("?")
+    play.wait("!document.getElementById('handbookscreen').hidden")
+    texts.append(play.page.inner_text("#handbookscreen"))
+    play.press("?")
+    for key in play.js("[...document.querySelectorAll('#app [data-info]')].map(b => b.dataset.info)"):
+        play.js(f"window.mm.controls.actions.openGlossary({key!r})")
+        play.wait("!document.getElementById('glossary').hidden")
+        texts.append(play.page.inner_text("#glossary"))
+        play.press("Escape")
+    assert [t for t in texts if "venue" in t.lower()] == []
+    joined = "\n".join(texts).lower()
+    assert "broker charge" in joined and "hedge with the broker" in joined and "\tbroker\t" in joined
+
+
 def _typescript() -> str | None:
     found = os.environ.get("MM_TYPESCRIPT_JS")
     if found:

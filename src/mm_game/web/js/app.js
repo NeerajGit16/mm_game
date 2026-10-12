@@ -8,6 +8,7 @@ import { createMarketChart, createSessionCharts } from "./chart.js";
 import * as views from "./views.js";
 import * as tabs from "./tabs.js";
 import { showReveal } from "./reveal.js";
+import { bindGlossary, hideGlossary, loadGlossary, showGlossary } from "./glossary.js";
 
 const store = createStore();
 /** @type {WebSocket | null} */
@@ -36,6 +37,7 @@ const controls = createControls({
     hint: views.setHint,
     box: views.setBox,
     handbook: views.setHandbook,
+    glossary: (key) => { if (key) showGlossary(key); else hideGlossary(); },
     cycleTab: () => { tabs.cycleTab(); schedule(); },
   },
 });
@@ -89,9 +91,14 @@ function connect() {
   socket.onclose = () => views.disconnected();
 }
 
+// The (i) panels: during play, opening one pauses the clock like the
+// handbook; on the reveal there is no clock.
+bindGlossary(() => { if (revealed) hideGlossary(); else controls.actions.closeGlossary(); });
+const glossaryReady = loadGlossary().catch(() => null);
+
 const saved = new URLSearchParams(location.search).get("reveal");
 if (saved) {
-  openSaved(saved).catch((error) => {
+  glossaryReady.then(() => openSaved(saved)).catch((error) => {
     const toast = document.createElement("div");
     toast.className = "toast";
     toast.textContent = String(error.message);
@@ -102,6 +109,7 @@ if (saved) {
     if (!revealed && controls.onKey(e)) e.preventDefault();
   });
   views.bindButtons(controls, schedule);
+  views.onClick("#app [data-info]", (el) => controls.actions.openGlossary(views.data(el, "info")));
   tabs.bindTabs(schedule);
   connect();
 }

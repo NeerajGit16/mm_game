@@ -15,9 +15,14 @@ whichever kind they are:
 - an unannounced move: the move's own contribution to your P&L -- the
   position you held over each step of its ramp times the move's increment
   on that step;
-- a single ticket (a client fill): its price against the truth at its next
-  event -- the edge plus the mark-out through the next print or move end --
-  or against the truth at the close when no event follows.
+- a single ticket (a client fill), scored by what the ticket was. A fill on
+  an informed RFQ: its price against the truth at its next event -- the
+  edge plus the mark-out through the next print or move end -- or at the
+  close when no event follows. Any other fill: the edge plus the mark-out
+  over ``UNINFORMED_TICKET_S``, stopped short of the next print's jump or
+  the next move's ramp. The print and move moments already carry the
+  position through those, so a sale ahead of a print that cut risk is not
+  scored as the print's loss.
 
 Ties go to the earlier one. Each comes with one sentence saying what the
 flow oracle did instead.
@@ -40,6 +45,7 @@ from mm_game.world import World
 
 TRUTH_EVERY_S = 1.0
 MOMENTS = 3
+UNINFORMED_TICKET_S = 300.0
 BOTS = ("disciplined", "oracle")
 _KIND_ORDER = {"print": 0, "move": 1, "ticket": 2}
 
@@ -123,6 +129,25 @@ def _ticket_usd(world: World, t: Trade) -> float:
     return t.quantity * (float(path.values[end]) - t.price) * world.config.dollars_per_bp_per_lot
 
 
+def ticket_end(world: World, t: Trade) -> tuple[int, str, int | None]:
+    """Where a client fill's moment score stops: the step whose truth it is
+    marked to, why (``print``, ``move``, ``close`` or ``horizon``), and which
+    print or move. An informed fill runs through its next event. Any other
+    fill runs ``UNINFORMED_TICKET_S`` and stops short of the next print's
+    jump (the step before it lands) or the next move's ramp (its start; a
+    fill inside a ramp stops where it is)."""
+    path = world.path
+    n = path.n_steps
+    if fill_type(world.schedule.rfqs[t.rfq_ordinal]) != "uninformed":
+        ev = path.next_event_markout(t.step)
+        return (n, "close", None) if ev.event_step is None else (ev.event_step, ev.kind, ev.index)
+    horizon = t.step + round(UNINFORMED_TICKET_S / world.config.dt)
+    end = (horizon, "horizon", None) if horizon <= n else (n, "close", None)
+    cuts = [(int(e) - 1, "print", i) for i, e in enumerate(path.event_steps) if e > t.step]
+    cuts += [(max(m.start_step, t.step), "move", m.index) for m in path.move_list if m.end_step > t.step]
+    return min([end, *cuts], key=lambda c: c[0])
+
+
 def _bot_rfqs(session: Session) -> list[dict[str, Any]]:
     """What a bot did on each RFQ it was shown: its quote and the outcome."""
     quotes = {e.data["rfq_ordinal"]: e.data for e in session.log.of(Kind.QUOTE_SENT)}
@@ -195,8 +220,7 @@ def candidates(world: World, trades: list[Trade], oracle: list[Trade]) -> list[d
     for t in trades:
         if t.source is not Source.CLIENT:
             continue
-        ev = path.next_event_markout(t.step)
-        end = ev.event_step if ev.event_step is not None else n
+        end, why, which = ticket_end(world, t)
         out.append(
             {
                 "kind": "ticket",
@@ -204,12 +228,34 @@ def candidates(world: World, trades: list[Trade], oracle: list[Trade]) -> list[d
                 "step": t.step,
                 "from_step": max(0, t.step - round(300 / dt)),
                 "to_step": min(n, max(end, t.step) + round(120 / dt)),
-                "pnl_usd": _ticket_usd(world, t),
+                "pnl_usd": t.quantity * (float(path.values[end]) - t.price) * usd,
+                "end_step": end,
+                "end": why,
+                "end_index": which,
                 "quantity": t.quantity,
                 "price": t.price,
             }
         )
     return out
+
+
+def _ticket_basis(world: World, c: dict[str, Any]) -> str:
+    """What a ticket moment's dollars measure, in words."""
+    informed = fill_type(world.schedule.rfqs[c["index"]]) != "uninformed"
+    which = None if c["end_index"] is None else c["end_index"] + 1
+    if informed:
+        return {
+            "print": f"against the truth through print {which}",
+            "move": f"against the truth through the end of unannounced move {which}",
+            "close": "against the truth at the close",
+        }[c["end"]]
+    after = f"{(c['end_step'] - c['step']) * world.config.dt:.0f}s on"
+    return {
+        "horizon": f"its spread plus its {UNINFORMED_TICKET_S:.0f}s mark-out against the truth",
+        "print": f"its spread plus its mark-out against the truth, stopped before print {which} ({after})",
+        "move": f"its spread plus its mark-out against the truth, stopped before unannounced move {which} ({after})",
+        "close": "its spread plus its mark-out against the truth up to the close",
+    }[c["end"]]
 
 
 def choose(cands: list[dict[str, Any]], k: int = MOMENTS) -> list[dict[str, Any]]:
@@ -262,7 +308,7 @@ def _sentence(world: World, c: dict[str, Any], oracle_rfqs: dict[int, dict[str, 
         text = (
             f"You {'bought' if c['quantity'] > 0 else 'sold'} {abs(c['quantity'])} "
             f"{'from' if c['quantity'] > 0 else 'to'} client {q.client_id} ({who}) "
-            f"at {_price(c['price'])}: {_usd(c['pnl_usd'])} against the truth through the next event; "
+            f"at {_price(c['price'])}: {_usd(c['pnl_usd'])}, {_ticket_basis(world, c)}; "
             f"the flow oracle {_oracle_on(oracle_rfqs.get(c['index']))}."
         )
     return title, text

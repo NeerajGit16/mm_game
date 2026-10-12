@@ -3,12 +3,16 @@
 // play from the reveal message, or later from a saved record with no game
 // running. The hidden layer is shown here for the first time.
 //
-// Summary: the score and capture ratio, the reveal chart, your position
-// against the benchmarks, the truth-based breakdown with its horizon
-// switch, the clients revealed, the three moments, the bots' rules.
-// Tabs: Clients (full), Tickets (every RFQ), Track record.
+// Summary, in two columns: on the left, staying in view, the reveal chart,
+// your position against the benchmarks and the clients revealed; on the
+// right, cards at their natural height -- the score and capture ratio, the
+// truth-based breakdown with its horizon switch, the three moments (each
+// marks the charts when clicked), the bots' rules. The page scrolls as a
+// whole. Tabs: Clients (full), Tickets (every RFQ), Track record. Every
+// panel has an (i) with what its columns mean.
 
 import { createRevealCharts } from "./reveal_chart.js";
+import { hideGlossary, showGlossary } from "./glossary.js";
 import { escapeHtml, longCategory, mmss, money, percent, price, shortCategory, signedInt, tone } from "./format.js";
 
 /** @typedef {import("./protocol.js").CoachingRecord} CoachingRecord */
@@ -19,13 +23,13 @@ import { escapeHtml, longCategory, mmss, money, percent, price, shortCategory, s
 /** @typedef {import("./protocol.js").Pooled} Pooled */
 /** @typedef {import("./protocol.js").PooledScore} PooledScore */
 
-const HORIZON_LABEL = /** @type {Record<string, string>} */ ({ "60s": "60s", "300s": "300s", next_event: "next event" });
+const HORIZON_LABEL = /** @type {Record<string, string>} */ ({ "60s": "60s", "300s": "300s", next_event: "next print/move" });
 const BY_TYPE = [
   ["uninformed", "Adverse selection · uninformed"],
   ["informed_print", "Adverse selection · informed, prints"],
   ["informed_move", "Adverse selection · informed, moves"],
 ];
-const SHOWN_CLIENTS = 4;
+const SHOWN_CLIENTS = 5;
 const TRACK_SCORES = /** @type {const} */ ([["pnl", "P&L"], ["risk_adjusted", "risk-adjusted"]]);
 const TRACK_WHO = /** @type {const} */ ([["you_minus_disciplined", "You"], ["oracle_minus_disciplined", "Flow oracle"]]);
 
@@ -143,20 +147,40 @@ export function breakdown(record, horizon) {
   }
 }
 
+/**
+ * Informed RFQs and, in brackets, how many of them you filled: "4 (0)".
+ * @param {ClientReveal} c
+ */
+const informedRfqs = (c) => `${c.informed_rfqs} (${c.informed_fills})`;
+
+/**
+ * The next-print/move mark-out of one kind of fill, or — when there were none.
+ * @param {ClientReveal} c
+ * @param {"informed" | "other"} kind
+ */
+function splitCell(c, kind) {
+  const fills = kind === "informed" ? c.informed_fills : c.won - c.informed_fills;
+  return fills ? cell(c.markouts_by_fill_usd[kind].next_event) : '<td class="r">—</td>';
+}
+
 /** @param {CoachingRecord} record */
 function clientsTop(record) {
   const entries = Object.entries(record.diagnostics.clients);
   const traded = entries.filter(([, c]) => c.won > 0)
     .sort(([, a], [, b]) => Math.abs(b.markouts_usd.next_event) - Math.abs(a.markouts_usd.next_event));
   const top = traded.slice(0, SHOWN_CLIENTS);
-  body("rv-clients-top").innerHTML = top.map(([id, c]) => `<tr>
+  body("rv-clients-top").innerHTML = top.map(([id, c]) => `<tr data-client="${id}">
     <td>C${id} · ${shortCategory(c.category)}</td><td>${c.informed_type ? "informed" : "uninformed"}</td><td>${escapeHtml(knewAbout(c))}</td>
-    <td class="r">${c.lots}</td><td class="r">${signedInt(c.net_lots)}</td>${cell(c.markouts_usd["300s"])}${cell(c.markouts_usd.next_event)}</tr>`).join("");
+    <td class="r">${informedRfqs(c)}</td><td class="r">${c.lots}</td><td class="r">${signedInt(c.net_lots)}</td>
+    ${cell(c.markouts_usd["300s"])}${splitCell(c, "informed")}${splitCell(c, "other")}</tr>`).join("");
   const rest = entries.length - top.length;
-  $("rv-clients-more").textContent = rest > 0 ? `+ ${rest} more in the Clients tab (by what they cost you through the next event)` : "";
+  $("rv-clients-more").textContent = rest > 0 ? `${rest} more in the Clients tab` : "all clients you traded with";
 }
 
 /**
+ * Clicking a moment marks it on both charts, zooms to it and highlights
+ * its card; clicking the same card again clears the mark and the zoom.
+ * One moment at a time.
  * @param {CoachingRecord} record
  * @param {import("./reveal_chart.js").RevealCharts} charts
  */
@@ -168,8 +192,15 @@ function moments(record, charts) {
   for (const el of /** @type {NodeListOf<HTMLElement>} */ (box.querySelectorAll(".moment"))) {
     el.addEventListener("click", () => {
       const m = record.reveal.moments[Number(el.dataset.moment)];
-      for (const other of box.querySelectorAll(".moment")) other.classList.toggle("active", other === el);
-      charts.jumpTo(m.from_step, m.to_step);
+      const on = !el.classList.contains("active");
+      for (const other of box.querySelectorAll(".moment")) other.classList.toggle("active", on && other === el);
+      if (on) {
+        charts.mark(m);
+        charts.jumpTo(m.from_step, m.to_step);
+      } else {
+        charts.mark(null);
+        charts.reset();
+      }
     });
   }
 }
@@ -184,8 +215,9 @@ function clientsTab(record) {
     /** @param {string} k */
     const m = (k) => (c.won ? cell(mk[k]) : '<td class="r">—</td>');
     return `<tr data-client="${id}"><td>${id}</td><td>${c.category.replace("_", " ")}</td><td>${c.informed_type ? "informed" : "uninformed"}</td>
-      <td class="r">${c.rfqs}</td><td class="r">${c.quoted}</td><td class="r">${c.won}</td><td class="r">${c.lots}</td>
-      <td class="r">${signedInt(c.net_lots)}</td>${m("60s")}${m("300s")}${m("next_event")}<td>${escapeHtml(knewAbout(c))}</td></tr>`;
+      <td class="r">${c.rfqs}</td><td class="r">${informedRfqs(c)}</td><td class="r">${c.quoted}</td><td class="r">${c.won}</td><td class="r">${c.lots}</td>
+      <td class="r">${signedInt(c.net_lots)}</td>${m("60s")}${m("300s")}${m("next_event")}${splitCell(c, "informed")}${splitCell(c, "other")}
+      <td>${escapeHtml(knewAbout(c))}</td></tr>`;
   }).join("");
 }
 
@@ -239,6 +271,7 @@ function ticketsTab(record) {
     return `<tr data-rfq="${r.ordinal}" class="${o && o.outcome === "won" ? "" : "muted"}"><td>${mmss(r.step * cfg.dt)}</td><td class="r">${r.ordinal}</td>
       <td>${client ? `C${client.client_id} · ${shortCategory(client.category)}` : "—"}</td><td>${whoItWas(record, r)}</td>
       <td class="r">${rfq ? rfq.size : "—"}</td><td>${type}</td><td class="r">${quote}</td><td>${outcome}</td>
+      <td class="r">${o ? signedInt(o.position_after) : "—"}</td>
       ${mk("60s")}${mk("300s")}${mk("next_event")}<td>${oracleDid(oracle.get(r.ordinal))}</td></tr>`;
   }).join("");
 }
@@ -276,12 +309,30 @@ function trackTab(track, sessionId) {
   }).join("");
 }
 
+/**
+ * Size the two charts so the left column -- charts and clients -- fits the
+ * window below the tabs, the position chart half the reveal chart's height.
+ */
+function fitLeft() {
+  const left = $("rv-left");
+  if (!left.offsetHeight) return; // another tab is showing
+  const chart = $("rv-chart");
+  const pos = $("rv-pos");
+  const top = left.getBoundingClientRect().top + window.scrollY;
+  const room = window.innerHeight - top - 12;
+  const fixed = left.offsetHeight - chart.offsetHeight - pos.offsetHeight;
+  const h = Math.round(Math.max(220, Math.min(560, (room - fixed) / 1.5)));
+  chart.style.height = `${h}px`;
+  pos.style.height = `${Math.round(h / 2)}px`;
+}
+
 /** @param {string} name */
 function showTab(name) {
   for (const b of /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll("#rv-tabs [data-rtab]"))) {
     b.classList.toggle("active", b.dataset.rtab === name);
   }
   for (const t of ["summary", "clients", "tickets", "track"]) $(`rv-${t}`).hidden = t !== name;
+  if (name === "summary") fitLeft();
 }
 
 /**
@@ -289,7 +340,7 @@ function showTab(name) {
  * @param {{record: CoachingRecord, track: TrackMsg | null, savedTo: string, sessionId: string | null}} args
  */
 export function showReveal({ record, track, savedTo, sessionId }) {
-  for (const id of ["app", "startscreen", "handbookscreen", "sizebox", "hint"]) {
+  for (const id of ["app", "startscreen", "handbookscreen", "sizebox", "hint", "glossary"]) {
     const el = document.getElementById(id);
     if (el) el.hidden = true;
   }
@@ -302,15 +353,21 @@ export function showReveal({ record, track, savedTo, sessionId }) {
   clientsTab(record);
   ticketsTab(record);
   trackTab(track, sessionId);
+  fitLeft();
   const charts = createRevealCharts($("rv-chart"), $("rv-pos"), $("rv-tip"), record);
   moments(record, charts);
+  window.addEventListener("resize", fitLeft);
   for (const b of /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll("#rv-horizons [data-horizon]"))) {
     b.addEventListener("click", () => breakdown(record, b.dataset.horizon ?? "next_event"));
   }
   for (const b of /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll("#rv-tabs [data-rtab]"))) {
     b.addEventListener("click", () => showTab(b.dataset.rtab ?? "summary"));
   }
-  $("rv-clients-more").addEventListener("click", () => showTab("clients"));
+  // (i): what each panel's columns mean. No clock to pause here.
+  for (const b of /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll("#reveal [data-info]"))) {
+    b.addEventListener("click", () => showGlossary(b.dataset.info ?? ""));
+  }
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") hideGlossary(); });
   const bots = /** @type {HTMLInputElement} */ ($("rv-bots"));
   bots.checked = false;
   bots.addEventListener("change", () => charts.showBots(bots.checked));

@@ -30,7 +30,7 @@ UNLOCK_AFTER_SCORED_SESSIONS = 10
 PENALTY_EXAMPLE_LOTS = (50, 100)  # the positions the score item prices
 CARRY_EXAMPLE_LOTS = 100  # and the between-prints charge, for this many lots
 CARRY_EXAMPLE_S = 10 * 60.0  # held this long
-IMPACT_PER_LOTS = 100  # size charges -- the venue's, the dealers', the tolerance's -- are per this many lots
+IMPACT_PER_LOTS = 100  # size charges -- the broker's, the dealers', the tolerance's -- are per this many lots
 
 
 @dataclass(frozen=True)
@@ -94,7 +94,7 @@ def your_desk(config: GameConfig, scoring: ScoringConfig) -> list[Item]:
         _item(
             "The session",
             "This one runs {minutes} minutes (sessions come in {presets} minutes). You start flat. Anything you "
-            "still hold at the end is liquidated at {close_mult}× the venue's cost.",
+            "still hold at the end is liquidated at {close_mult}× the broker's charge.",
             minutes=_n(config.session_length / 60),
             presets=", ".join(str(p) for p in presets[:-1]) + f" or {presets[-1]}",
             close_mult=_n(config.close_liquidation_multiplier),
@@ -121,15 +121,22 @@ def your_desk(config: GameConfig, scoring: ScoringConfig) -> list[Item]:
             limit=str(config.position_limit_lots),
         ),
         _item(
-            "The hedge venue",
-            "Any time, at the screen plus {base}bp a lot, plus {impact}bp a lot per {per} lots of size. Within "
-            "{window} minutes of a print the cost rises, up to {widen} at the print itself. Hedges don't move "
-            "the market.",
+            "The broker",
+            "You can hedge with the broker any time, at the screen plus {base}bp a lot, plus {impact}bp a lot per "
+            "{per} lots of size. Within {window} minutes of a print the charge rises, up to {widen} at the print "
+            "itself. Hedges don't move the market.",
             base=_n(config.hedge_cost_bp),
             impact=_n(config.hedge_impact_bp),
             per=str(IMPACT_PER_LOTS),
             window=_n(config.hedge_print_window_s / 60),
             widen="double" if widen == 2.0 else f"{_n(widen)}×",
+        ),
+        _item(
+            "Hedges and the close",
+            "fill off the screen, never the true value: when the screen is wrong, you pay for it. Whatever you "
+            "still hold at the end is liquidated off the last screen at {close_mult}× the broker's charge, however "
+            "wrong that screen is — one more reason to get flat early.",
+            close_mult=_n(config.close_liquidation_multiplier),
         ),
         _item(
             "The calendar",

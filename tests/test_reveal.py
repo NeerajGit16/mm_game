@@ -13,13 +13,14 @@ from __future__ import annotations
 
 import json
 import math
+from pathlib import Path
 
 import numpy as np
 import pytest
 
 from mm_game import agents, game, handbook, records, reveal, world
 from mm_game.book import Source, Trade
-from mm_game.config import BenchmarkConfig, GameConfig
+from mm_game.config import BenchmarkConfig, GameConfig, ScoringConfig
 from mm_game.engine import Settings
 from mm_game.storage import DirectoryStorage, MemoryStorage
 
@@ -64,11 +65,23 @@ def independent_candidates(g: game.Game) -> list[dict]:
             for k in range(m.start_step, m.end_step)
         )
         out.append(("move", m.index, m.start_step, float(pnl) * usd))
-    ends = sorted([int(e) for e in path.event_steps] + [m.end_step for m in path.move_list])
+    prints = [int(e) for e in path.event_steps]
+    ends = sorted(prints + [m.end_step for m in path.move_list])
+    window = round(300 / cfg.dt)
     for t in you:
         if t.source is not Source.CLIENT:
             continue
-        end = next((e for e in ends if e > t.step), path.n_steps)
+        q = w.schedule.rfqs[t.rfq_ordinal]
+        if q.informed and q.informed_about is not None:
+            # An informed fill: through its next print or move end, else the close.
+            end = next((e for e in ends if e > t.step), path.n_steps)
+        else:
+            # Any other: 300 s, never through a print's jump or into a move's ramp.
+            end = min(
+                [min(t.step + window, path.n_steps)]
+                + [e - 1 for e in prints if e > t.step]
+                + [max(m.start_step, t.step) for m in path.move_list if m.end_step > t.step]
+            )
         out.append(("ticket", t.rfq_ordinal, t.step, t.quantity * (float(path.values[end]) - t.price) * usd))
     return out
 
@@ -77,11 +90,13 @@ def test_the_moments_are_the_three_largest_by_the_stated_rule(played):
     """The three moments are the three candidates -- every print, every
     move, every single ticket -- with the largest absolute P&L, worked out
     independently: a print as the position carried into it times its jump,
-    a move as its increments times the position held over its ramp, a
-    ticket against the truth at its next event. Each says what the oracle
-    did. Every candidate's P&L is checked, not only the three chosen. A
-    rule that ranked by signed P&L, or looked only at prints, or counted a
-    move's diffusion as the move, would pick different moments."""
+    a move as its increments times the position held over its ramp, an
+    informed ticket against the truth at its next event, any other ticket
+    as its spread plus its 300 s mark-out stopped short of a print or a
+    move. Each says what the oracle did. Every candidate's P&L is checked,
+    not only the three chosen. A rule that ranked by signed P&L, or looked
+    only at prints, or counted a move's diffusion as the move, or ran an
+    uninformed ticket through the print, would pick different moments."""
     cands = independent_candidates(played)
     kinds = {c[0] for c in cands}
     assert {"print", "move", "ticket"} <= kinds
@@ -202,21 +217,169 @@ def test_the_bots_rules_on_the_reveal_are_their_config(bench):
     assert ("within" in text) == (bench.disciplined_print_widen_bp > 0)
 
 
-def test_an_old_format_record_opens_in_the_current_layout():
-    """A coaching record saved under format 1 -- before the reveal block --
-    loads as the current format: rebuilt from what it carries (header,
-    settings, configs, actions), with the reveal block, and with exactly
-    the scores, decomposition and summary it was saved with. A loader that
-    refused it, or rebuilt a different session, strands a real session."""
-    storage = DirectoryStorage(FIXTURES / "protocol2-format1-config2")
+CLIENT_SPLIT = {"informed_rfqs", "informed_fills", "markouts_by_fill_usd"}
+
+
+@pytest.mark.parametrize("name,version", [("protocol2-format1-config2", 1), ("protocol2-replay1-record2-track1-config2", 2)])
+def test_an_old_format_record_opens_in_the_current_layout(name, version):
+    """A coaching record saved under format 1 (before the reveal block) or
+    2 (before the clients' split by ticket) loads as the current format:
+    rebuilt from what it carries (header, settings, configs, actions) with
+    today's definitions -- the reveal block, the split -- and with exactly
+    the scores, decomposition, events and per-client numbers it was saved
+    with. Its summary.md stays as it was written. A loader that refused it,
+    rebuilt a different session, or rewrote what the player read at the
+    time, strands or falsifies a real session."""
+    storage = DirectoryStorage(FIXTURES / name)
     base = "sessions/30m-3-0001"
     old = json.loads(storage.read_text(f"{base}/coaching_record.json"))
-    assert old["format_version"] == 1 and "reveal" not in old
+    summary = storage.read_text(f"{base}/summary.md")
+    assert old["format_version"] == version and ("reveal" in old) == (version >= 2)
     new = records.load_coaching_record(old)
     assert new["format_version"] == records.RECORD_FORMAT_VERSION and "reveal" in new
-    for key in ("scores", "decomposition", "diagnostics", "capture_ratio", "benchmarks", "rfqs", "events"):
+    for key in ("scores", "decomposition", "capture_ratio", "benchmarks", "rfqs", "events"):
         assert new[key] == old[key], key
-    assert records.markdown_summary(new) == storage.read_text(f"{base}/summary.md")
+    assert {k: v for k, v in new["diagnostics"].items() if k != "clients"} == {
+        k: v for k, v in old["diagnostics"].items() if k != "clients"}
+    for cid, c in old["diagnostics"]["clients"].items():
+        rebuilt = new["diagnostics"]["clients"][cid]
+        assert {k: v for k, v in rebuilt.items() if k not in CLIENT_SPLIT} == c, cid
+        assert set(rebuilt) - set(c) == CLIENT_SPLIT
+    if version == 2:
+        for key in ("truth", "screen", "prints", "moves", "fills", "positions", "bots", "rules"):
+            assert new["reveal"][key] == old["reveal"][key], key
+    assert storage.read_text(f"{base}/summary.md") == summary
+    assert records.markdown_summary(new) != summary  # today's columns, in a summary nobody stored
+
+
+def test_a_ticket_moment_stops_where_the_rule_says():
+    """An informed fill runs through its next event; any other fill runs
+    300 s but stops on the step before a print lands, at the start of a
+    move's ramp, or where it is when it was filled inside a ramp. Each case
+    against a hand-placed fill on a real world, so the rule is checked where
+    the session happened not to put a fill."""
+    cfg = GameConfig.for_session(60)
+    w = next(
+        w for w in (world.generate(cfg, s) for s in range(1, 300))
+        if w.path.move_list and w.path.event_steps.size
+        and any(q.informed and q.informed_about is not None for q in w.schedule.rfqs)
+        and w.path.move_list[0].start_step > 4000 and int(w.path.event_steps[0]) > 4000
+    )
+    plain = next(q for q in w.schedule.rfqs if not q.informed)
+    knew = next(q for q in w.schedule.rfqs if q.informed and q.informed_about is not None)
+    window = round(300 / cfg.dt)
+    e = int(w.path.event_steps[0])
+    m = w.path.move_list[0]
+
+    def fill(step, q):
+        return Trade(0, step, Source.CLIENT, 10, w.path.public.screen_at(step), q.ordinal, 0.0, 10)
+
+    assert reveal.ticket_end(w, fill(e - 1000, plain)) == (e - 1, "print", 0)
+    assert reveal.ticket_end(w, fill(m.start_step - 1000, plain))[:2] == (m.start_step, "move")
+    assert reveal.ticket_end(w, fill(m.start_step + 1, plain))[:2] == (m.start_step + 1, "move")
+    far = next(s for s in range(0, cfg.n_steps - window)
+               if all(not (s < x <= s + window + 1) for x in w.path.event_steps)
+               and all(not (s < mv.end_step and mv.start_step <= s + window) for mv in w.path.move_list))
+    assert reveal.ticket_end(w, fill(far, plain)) == (far + window, "horizon", None)
+    ev = w.path.next_event_markout(e - 1000)
+    assert reveal.ticket_end(w, fill(e - 1000, knew)) == (ev.event_step, ev.kind, ev.index)
+
+
+FIRST_REAL = Path(__file__).resolve().parent / "fixtures" / "play" / "30m-1314533384-0001"
+
+
+@pytest.fixture(scope="module")
+def first_real():
+    """The first session played for real (30 minutes), rebuilt from its replay file."""
+    rf = records.load_replay(json.loads((FIRST_REAL / "replay.json").read_text(encoding="utf-8")))
+    session, w = records.replay(rf)
+    bots = {b: agents.run_bot(b, w, settings=rf.settings, scoring=rf.scoring, benchmark=rf.benchmark) for b in agents.BOTS}
+    record = records.coaching_record(w, session, scoring=rf.scoring, benchmark=rf.benchmark, bots=bots, flags=rf.flags)
+    return w, session, record
+
+
+def summary_clients(md: str) -> dict[str, dict[str, str]]:
+    """summary.md's clients table, row by client, cell by header."""
+    lines = md.splitlines()
+    i = next(k for k, ln in enumerate(lines) if ln.startswith("| Client |"))
+    heads = [c.strip() for c in lines[i].strip("|").split("|")]
+    rows = {}
+    for ln in lines[i + 2:]:
+        if not ln.startswith("|"):
+            break
+        cells = [c.strip() for c in ln.strip("|").split("|")]
+        rows[cells[0]] = dict(zip(heads, cells))
+    return rows
+
+
+def test_a_real_sessions_informed_clients_show_no_informed_fills(first_real):
+    """In the first real session clients 1 and 3 are informed types, but every
+    fill he did with them was on an RFQ outside their information window:
+    their informed RFQs show "(0)" filled, the informed-fill mark-out is
+    empty, and all of their next-print/move mark-out is under other fills.
+    Lumped by client type, as before, it read as if informed clients had
+    picked the player off when there were no informed fills at all."""
+    _, _, record = first_real
+    clients = record["diagnostics"]["clients"]
+    md = summary_clients(records.markdown_summary(record))
+    for cid in ("1", "3"):
+        c = clients[cid]
+        assert c["informed_type"] and c["informed_rfqs"] > 0 and c["won"] > 0
+        assert c["informed_fills"] == 0
+        assert c["markouts_by_fill_usd"]["informed"] == {"60s": 0.0, "300s": 0.0, "next_event": 0.0}
+        assert c["markouts_by_fill_usd"]["other"]["next_event"] == pytest.approx(c["markouts_usd"]["next_event"]) != 0
+        row = md[cid]
+        assert row["Informed RFQs (filled)"] == f"{c['informed_rfqs']} (0)"
+        assert row["Mark-out to next print/move, informed fills"] == "—"
+        assert row["Mark-out to next print/move, other fills"] == records._signed(c["markouts_usd"]["next_event"])
+    assert sum(c["informed_fills"] for c in clients.values()) == 0
+
+
+def test_summary_md_splits_each_clients_mark_out_by_ticket():
+    """summary.md's clients table prints, for each client, its informed
+    RFQs and how many were filled, and the next-print/move mark-out of its
+    informed fills and of its other fills -- each from its own part of the
+    split, never the client's total. Checked on a session (30 minutes, seed
+    8) where a client has both kinds of fill, so each part differs from the
+    total."""
+    cfg = GameConfig.for_session(30)
+    g = game.Game(cfg, 8, storage=MemoryStorage(), settings=Settings(preset=30))
+    game.run_headless(g, agents.ScriptedPlayer(cfg, BENCH))
+    clients = g.record["diagnostics"]["clients"]
+    rows = summary_clients(g.summary)
+    mixed = [cid for cid, c in clients.items() if c["informed_fills"] and c["won"] > c["informed_fills"]]
+    assert mixed, "the session should have a client with informed and other fills"
+    for cid, c in clients.items():
+        row, split = rows[cid], c["markouts_by_fill_usd"]
+        assert row["Informed RFQs (filled)"] == f"{c['informed_rfqs']} ({c['informed_fills']})"
+        informed = records._signed(split["informed"]["next_event"]) if c["informed_fills"] else "—"
+        other = records._signed(split["other"]["next_event"]) if c["won"] - c["informed_fills"] else "—"
+        assert row["Mark-out to next print/move, informed fills"] == informed, cid
+        assert row["Mark-out to next print/move, other fills"] == other, cid
+
+
+def test_a_real_sessions_1752_sale_is_not_scored_through_the_print(first_real):
+    """The 34-lot sale to client 5 at 17:52, 38 seconds before print 1, was
+    uninformed: its ticket moment is its spread plus its mark-out up to the
+    step before the print, not through it. Through the print it read as a
+    $4,726 loss -- the print's own move, already the print moment's -- and
+    was one of the three moments; it is neither now."""
+    w, session, record = first_real
+    dt = w.config.dt
+    t = next(t for t in session.book.trades if t.source is Source.CLIENT and t.rfq_ordinal == 34)
+    assert (t.quantity, w.schedule.rfqs[34].client_id, f"{int(t.step * dt) // 60}:{int(t.step * dt) % 60}") == (-34, 5, "17:52")
+    e = int(w.path.event_steps[0])
+    assert t.step < e < t.step + round(300 / dt)
+    assert reveal.ticket_end(w, t) == (e - 1, "print", 0)
+    usd = w.config.dollars_per_bp_per_lot
+    through = t.quantity * (float(w.path.values[e]) - t.price) * usd
+    assert through == pytest.approx(-4726, abs=1)
+    oracle = agents.run_bot("oracle", w, settings=session.settings, scoring=ScoringConfig(), benchmark=BENCH)
+    cand = next(c for c in reveal.candidates(w, list(session.book.trades), list(oracle.book.trades))
+                if c["kind"] == "ticket" and c["index"] == 34)
+    assert cand["pnl_usd"] == pytest.approx(t.quantity * (float(w.path.values[e - 1]) - t.price) * usd)
+    assert cand["pnl_usd"] > 0 > through
+    assert ("ticket", 34) not in {(m["kind"], m["index"]) for m in record["reveal"]["moments"]}
 
 
 def test_a_print_counts_the_position_carried_into_it_not_a_hedge_on_its_step(played):

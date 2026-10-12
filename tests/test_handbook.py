@@ -200,10 +200,25 @@ def test_the_text_follows_the_config():
     desk read differently wherever their numbers differ."""
     a = {i.head: i.text for i in handbook.your_desk(GameConfig.for_session(60), SCORING)}
     b = {i.head: i.text for i in handbook.your_desk(*PERTURBED)}
-    for head in ("The product", "The session", "Clients", "Competition", "Position limit", "The hedge venue",
-                 "The calendar", "The screen", "Your score"):
+    for head in ("The product", "The session", "Clients", "Competition", "Position limit", "The broker",
+                 "Hedges and the close", "The calendar", "The screen", "Your score"):
         assert a[head] != b[head], head
-    assert "±150 lots" in b["Position limit"] and "up to 1.5× at the print" in b["The hedge venue"]
+    assert "±150 lots" in b["Position limit"] and "up to 1.5× at the print" in b["The broker"]
+    assert "at 2× the broker's charge" in b["Hedges and the close"]
+
+
+@pytest.mark.parametrize("config,scoring", DESKS)
+def test_part_1_says_hedges_and_the_close_fill_off_the_screen(config, scoring):
+    """Part 1 says hedges and the close fill off the screen, not the truth --
+    so a wrong screen at the close costs you -- with the close's multiple
+    generated, and the item sits beside the broker's. A handbook silent on
+    it leaves the player to discover the close's price the expensive way."""
+    items = {i.head: i for i in handbook.your_desk(config, scoring)}
+    off = items["Hedges and the close"]
+    assert "off the screen, never the true value" in off.text and "the last screen" in off.text
+    assert off.facts == {"close_mult": f"{config.close_liquidation_multiplier:g}"}
+    heads = list(items)
+    assert heads.index("Hedges and the close") == heads.index("The broker") + 1
 
 
 @pytest.mark.parametrize("minutes", [30, 60, 120])

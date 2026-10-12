@@ -57,9 +57,9 @@
           <div id="chart"></div>
         </div>
         <div class="panel blotter-panel">
-          <div class="panel-head"><span class="title">Blotter</span><span class="muted small">most recent first</span></div>
+          <div class="panel-head"><span class="title">Blotter <button class="info" data-info="play.blotter" title="What the columns mean">i</button></span><span class="muted small">most recent first</span></div>
           <div class="scroll">
-            <table class="grid" id="blotter">
+            <table class="grid" id="blotter" data-glossary="play.blotter">
               <thead><tr>
                 <th>Time</th><th class="r">RFQ</th><th>Client</th><th class="r">Size</th><th>Type</th>
                 <th class="r">Your bid / ask</th><th>Outcome</th><th>What you learned</th><th class="r">Pos</th>
@@ -72,11 +72,11 @@
 
       <div class="tab-body" id="tab-pnl" hidden>
         <div class="panel tiles-panel">
-          <div class="panel-head"><span class="title">Session P&amp;L · every trade marked to the current screen</span><span class="muted small">live · screen-based</span></div>
-          <div class="tiles">
+          <div class="panel-head"><span class="title">Session P&amp;L · every trade marked to the current screen <button class="info" data-info="play.pnl_tiles" title="What the tiles mean">i</button></span><span class="muted small">live · screen-based</span></div>
+          <div class="tiles" data-glossary="play.pnl_tiles">
             <div class="tile"><div class="lbl">Edge · client fills</div><div class="num tile-v" id="tile-edge"></div><div class="muted small" id="tile-edge-sub"></div></div>
             <div class="op">+</div>
-            <div class="tile"><div class="lbl">Venue charge · hedges + close</div><div class="num tile-v" id="tile-venue"></div><div class="muted small" id="tile-venue-sub"></div></div>
+            <div class="tile"><div class="lbl">Broker charge · hedges + close</div><div class="num tile-v" id="tile-broker"></div><div class="muted small" id="tile-broker-sub"></div></div>
             <div class="op">+</div>
             <div class="tile"><div class="lbl">Moves since the trade</div><div class="num tile-v" id="tile-move"></div><div class="muted small">what the market did to what you held</div></div>
             <div class="op">=</div>
@@ -90,9 +90,9 @@
           <div id="pos-chart" class="chart-box short"></div>
         </div>
         <div class="panel pnl-table-panel">
-          <div class="panel-head"><span class="title">Ticket by ticket</span><span class="muted small">click a column to sort · rows add up to the P&amp;L above</span></div>
+          <div class="panel-head"><span class="title">Ticket by ticket <button class="info" data-info="play.pnl" title="What the columns mean">i</button></span><span class="muted small">click a column to sort · rows add up to the P&amp;L above</span></div>
           <div class="scroll">
-            <table class="grid sortable" id="pnl-table">
+            <table class="grid sortable" id="pnl-table" data-glossary="play.pnl">
               <thead><tr>
                 <th data-sort="step">Time</th><th data-sort="ticket">Ticket</th><th data-sort="with">With</th><th data-sort="quantity">You</th>
                 <th class="r" data-sort="price">Price</th><th class="r" data-sort="screen_then">Screen then</th>
@@ -107,15 +107,15 @@
 
       <div class="tab-body" id="tab-clients" hidden>
         <div class="panel fill">
-          <div class="panel-head"><span class="title">Clients · your trades with each, marked against the screen</span><span class="muted small">click a column to sort</span></div>
+          <div class="panel-head"><span class="title">Clients · your trades with each, marked against the screen <button class="info" data-info="play.clients" title="What the columns mean">i</button></span><span class="muted small">click a column to sort</span></div>
           <div class="scroll">
-            <table class="grid sortable" id="clients-table">
+            <table class="grid sortable" id="clients-table" data-glossary="play.clients">
               <thead><tr>
                 <th data-sort="client_id">Client</th><th data-sort="category">Category</th><th class="r" data-sort="rfqs">RFQs</th>
                 <th class="r" data-sort="quoted">Quoted</th><th class="r" data-sort="traded">Traded</th><th class="r" data-sort="hit_rate">Hit rate</th>
-                <th class="r" data-sort="lots">Lots</th><th class="r" data-sort="net">Your net</th><th class="r" data-sort="last_trade_step">Last trade</th>
-                <th class="r" data-sort="60s">60s / lot</th><th class="r" data-sort="lots60">Lots in 60s</th>
-                <th class="r" data-sort="300s">300s / lot</th><th class="r" data-sort="lots300">Lots in 300s</th>
+                <th class="r" data-sort="lots">Lots traded (gross)</th><th class="r" data-sort="net">Your net (+ = you bought)</th><th class="r" data-sort="last_trade_step">Last trade</th>
+                <th class="r" data-sort="60s">Mark-out 60s / lot</th><th class="r" data-sort="lots60">Lots in 60s</th>
+                <th class="r" data-sort="300s">Mark-out 300s / lot</th><th class="r" data-sort="lots300">Lots in 300s</th>
               </tr></thead>
               <tbody></tbody>
             </table>
@@ -125,14 +125,14 @@
 
       <div class="tab-body" id="tab-log" hidden>
         <div class="panel calendar-panel">
-          <div class="panel-head"><span class="title">Print calendar</span><span class="muted small">times only, never outcomes</span></div>
-          <table class="grid" id="calendar-table"><thead><tr><th>Print</th><th>Time</th><th>Status</th></tr></thead><tbody></tbody></table>
+          <div class="panel-head"><span class="title">Print calendar <button class="info" data-info="play.calendar" title="What the columns mean">i</button></span><span class="muted small">times only, never outcomes</span></div>
+          <table class="grid" id="calendar-table" data-glossary="play.calendar"><thead><tr><th>Print</th><th>Time</th><th>Status</th></tr></thead><tbody></tbody></table>
         </div>
         <div class="panel fill">
-          <div class="panel-head"><span class="title">Event log</span><span class="muted small">every event in order · filter by kind</span></div>
+          <div class="panel-head"><span class="title">Event log <button class="info" data-info="play.log" title="What the columns mean">i</button></span><span class="muted small">every event in order · filter by kind</span></div>
           <div id="log-filters" class="filters"></div>
           <div class="scroll" id="log-scroll">
-            <table class="grid" id="log-table"><thead><tr><th>Time</th><th class="r">#</th><th>Kind</th><th>What</th></tr></thead><tbody></tbody></table>
+            <table class="grid" id="log-table" data-glossary="play.log"><thead><tr><th>Time</th><th class="r">#</th><th>Kind</th><th>What</th></tr></thead><tbody></tbody></table>
           </div>
         </div>
       </div>
@@ -144,9 +144,9 @@
         <div class="panel-head"><span class="title" id="ticket-title">RFQ ticket</span><span class="muted small">Timer off</span></div>
         <div id="ticket-empty" class="empty">No RFQ on the ticket.</div>
         <div id="ticket-body" hidden>
-          <div class="client-line"><span id="t-client" class="client-name"></span><span id="t-category" class="muted"></span></div>
-          <div class="chips"><span class="chip num" id="t-size"></span><span class="chip" id="t-type"></span><span class="chip" id="t-comp"></span></div>
-          <div class="subpanel" id="t-history"></div>
+          <div class="t-ask"><span id="t-size" class="t-size num"></span><span id="t-type" class="t-side"></span></div>
+          <div class="client-line"><span id="t-client" class="client-name"></span><span id="t-category" class="muted"></span><span class="chip" id="t-comp"></span></div>
+          <div class="subpanel history" id="t-history"></div>
         </div>
         <div class="subpanel quote-box">
           <div class="quote-head">
@@ -170,12 +170,12 @@
       </section>
 
       <section class="panel" id="roster">
-        <div class="panel-head"><span class="title">Clients</span><span class="muted small">click a column to sort</span></div>
+        <div class="panel-head"><span class="title">Clients <button class="info" data-info="play.roster" title="What the columns mean">i</button></span><span class="muted small">click a column to sort</span></div>
         <div class="scroll">
-          <table class="grid" id="roster-table">
+          <table class="grid" id="roster-table" data-glossary="play.roster">
             <thead><tr>
               <th data-sort="client_id">Client</th><th class="r" data-sort="rfqs">RFQs</th><th class="r" data-sort="traded">Traded</th>
-              <th class="r" data-sort="net">Your net</th><th class="r" data-sort="60s">60s / lot</th><th class="r" data-sort="300s">300s / lot</th>
+              <th class="r" data-sort="net">Your net (+ = you bought)</th><th class="r" data-sort="60s">Mark-out 60s / lot</th><th class="r" data-sort="300s">Mark-out 300s / lot</th>
             </tr></thead>
             <tbody></tbody>
           </table>
@@ -197,7 +197,7 @@
       <div class="scale num muted"><span>flat</span><span>±50</span><span>±100+</span></div>
     </div>
     <div class="rs-cell hedge-cell">
-      <div class="rs-head"><span class="lbl">Hedge at the venue</span><span id="venue-cost" class="muted num small"></span></div>
+      <div class="rs-head"><span class="lbl">Hedge with the broker</span><span id="broker-cost" class="muted num small"></span></div>
       <div class="hedge-buttons">
         <button class="btn buy" data-hedge="10" title="Q">BUY 10 <kbd>Q</kbd></button>
         <button class="btn buy" data-hedge="25" title="W">BUY 25 <kbd>W</kbd></button>
@@ -227,6 +227,16 @@
   <div class="box-actions">
     <button class="btn buy" data-act="box-buy">BUY <kbd>B</kbd></button>
     <button class="btn sell" data-act="box-sell">SELL <kbd>S</kbd></button>
+  </div>
+</div>
+
+<!-- An (i) panel: what one table's columns mean. -->
+<div id="glossary" class="cover" hidden>
+  <div class="card glossary-card">
+    <div class="end-head"><h1 id="gl-title"></h1><span class="muted small"><kbd>Esc</kbd> closes · during play the clock stays paused</span></div>
+    <p id="gl-intro" class="rv-text"></p>
+    <dl id="gl-list" class="gl-list"></dl>
+    <button class="btn" id="gl-close">Close</button>
   </div>
 </div>
 
@@ -274,14 +284,14 @@
   </nav>
 
   <section class="rv-body rv-summary" id="rv-summary">
-    <div class="rv-left">
+    <div class="rv-left" id="rv-left">
       <div class="panel rv-chart-panel">
         <div class="panel-head">
-          <span class="title">What really happened</span>
+          <span class="title">What really happened <button class="info" data-info="reveal.chart" title="What the chart shows">i</button></span>
           <span class="legend">
             <span class="swatch truth"></span>true fair value <span class="swatch screen"></span>screen
             <span class="swatch runup"></span>print run-up <span class="swatch move"></span>unannounced move (from the leak)
-            <span class="ring">○</span>fill with an informed client <span class="hedge-sq">■</span>hedge
+            <span class="ring">○</span>informed RFQ <span class="hedge-sq">■</span>hedge
           </span>
         </div>
         <div class="rv-controls">
@@ -293,66 +303,75 @@
       </div>
       <div class="panel rv-pos-panel">
         <div class="panel-head">
-          <span class="title">Position · you against the benchmarks</span>
-          <span class="legend"><span class="you-line">━</span> you <span class="disc-line">┅</span> disciplined bot <span class="oracle-line">━</span> flow oracle</span>
+          <span class="title">Position · you against the benchmarks <button class="info" data-info="reveal.position" title="What the chart shows">i</button></span>
+          <span class="legend"><span class="you-line">━━</span> you <span class="disc-line">╍╍</span> disciplined bot <span class="oracle-line">┈┈</span> flow oracle</span>
         </div>
         <div id="rv-pos" class="chart-box"></div>
       </div>
       <div class="panel">
-        <div class="panel-head"><span class="title">Clients, revealed</span><span class="muted small">full table in the Clients tab</span></div>
-        <table class="grid" id="rv-clients-top"><thead><tr>
-          <th>Client</th><th>True type</th><th>Knew about</th><th class="r">Lots with you</th><th class="r">Your net</th>
-          <th class="r">300s</th><th class="r">Next event</th>
-        </tr></thead><tbody></tbody></table>
-        <div id="rv-clients-more" class="muted small"></div>
+        <div class="panel-head"><span class="title">Clients, revealed <button class="info" data-info="reveal.clients_top" title="What the columns mean">i</button></span><span class="muted small" id="rv-clients-more"></span></div>
+        <table class="grid wrap" id="rv-clients-top" data-glossary="reveal.clients_top"><thead>
+          <tr class="group"><th colspan="7"></th><th colspan="2">Mark-out to next print/move</th></tr>
+          <tr>
+            <th>Client</th><th>True type</th><th>Knew about</th><th class="r">Informed RFQs (filled)</th><th class="r">Lots traded (gross)</th>
+            <th class="r">Your net (+ = you bought)</th><th class="r">Mark-out 300s</th><th class="r">Informed fills</th><th class="r">Other fills</th>
+          </tr>
+        </thead><tbody></tbody></table>
       </div>
     </div>
     <div class="rv-right">
       <div class="panel">
-        <div class="panel-head"><span class="title">Score</span><span class="muted small">same world, same seed</span></div>
-        <table class="grid" id="rv-score"><thead><tr><th></th><th class="r">P&amp;L</th><th class="r">Risk-adj.</th></tr></thead><tbody></tbody></table>
+        <div class="panel-head"><span class="title">Score <button class="info" data-info="reveal.score" title="What the columns mean">i</button></span><span class="muted small">same world, same seed</span></div>
+        <table class="grid" id="rv-score" data-glossary="reveal.score"><thead><tr><th></th><th class="r">P&amp;L</th><th class="r">Risk-adj.</th></tr></thead><tbody></tbody></table>
         <p id="rv-capture" class="rv-text"></p>
-        <details class="rv-rules" open>
-          <summary class="lbl">The benchmarks' rules</summary>
-          <ul id="rv-rules"></ul>
-        </details>
       </div>
       <div class="panel">
         <div class="panel-head">
-          <span class="title">Where it came from</span>
+          <span class="title">Where it came from <button class="info" data-info="reveal.breakdown" title="What the lines mean">i</button></span>
           <span class="switch" id="rv-horizons">
-            <button class="btn" data-horizon="60s">60s</button><button class="btn" data-horizon="300s">300s</button><button class="btn active" data-horizon="next_event">next event</button>
+            <button class="btn" data-horizon="60s">60s</button><button class="btn" data-horizon="300s">300s</button><button class="btn active" data-horizon="next_event">next print/move</button>
           </span>
         </div>
-        <table class="grid" id="rv-breakdown"><tbody></tbody></table>
+        <table class="grid" id="rv-breakdown" data-glossary="reveal.breakdown"><tbody></tbody></table>
         <p class="muted small">Against true fair value; every line a signed contribution; the same numbers as summary.md.</p>
       </div>
       <div class="panel">
-        <div class="panel-head"><span class="title">Three moments</span><span class="muted small">click to jump the chart there</span></div>
+        <div class="panel-head"><span class="title">Three moments <button class="info" data-info="reveal.moments" title="How they are chosen">i</button></span><span class="muted small">click to mark it on the charts · again to clear</span></div>
         <div id="rv-moments"></div>
+      </div>
+      <div class="panel">
+        <details class="rv-rules" id="rv-rules-box">
+          <summary class="title">The benchmarks' rules</summary>
+          <ul id="rv-rules"></ul>
+        </details>
       </div>
     </div>
   </section>
 
   <section class="rv-body" id="rv-clients" hidden>
     <div class="panel fill">
-      <div class="panel-head"><span class="title">Clients, revealed</span><span class="muted small">mark-outs are P&amp;L contributions from your fills with each client, against the truth</span></div>
+      <div class="panel-head"><span class="title">Clients, revealed <button class="info" data-info="reveal.clients" title="What the columns mean">i</button></span><span class="muted small">mark-outs are P&amp;L contributions from your fills with each client, against the truth</span></div>
       <div class="scroll">
-        <table class="grid" id="rv-clients-table"><thead><tr>
-          <th>Client</th><th>Category</th><th>True type</th><th class="r">RFQs</th><th class="r">Quoted</th><th class="r">Won</th>
-          <th class="r">Lots</th><th class="r">Your net lots</th><th class="r">60s</th><th class="r">300s</th><th class="r">Next event</th><th>Knew about</th>
-        </tr></thead><tbody></tbody></table>
+        <table class="grid" id="rv-clients-table" data-glossary="reveal.clients"><thead>
+          <tr class="group"><th colspan="11"></th><th colspan="3">Mark-out to next print/move</th><th></th></tr>
+          <tr>
+            <th>Client</th><th>Category</th><th>True type</th><th class="r">RFQs</th><th class="r">Informed RFQs (filled)</th><th class="r">Quoted</th><th class="r">Won</th>
+            <th class="r">Lots traded (gross)</th><th class="r">Your net (+ = you bought)</th><th class="r">Mark-out 60s</th><th class="r">Mark-out 300s</th>
+            <th class="r">All fills</th><th class="r">Informed fills</th><th class="r">Other fills</th><th>Knew about</th>
+          </tr>
+        </thead><tbody></tbody></table>
       </div>
     </div>
   </section>
 
   <section class="rv-body" id="rv-tickets" hidden>
     <div class="panel fill">
-      <div class="panel-head"><span class="title">Tickets</span><span class="muted small">every RFQ: what you knew, what you did, what was true, what the flow oracle did</span></div>
+      <div class="panel-head"><span class="title">Tickets <button class="info" data-info="reveal.tickets" title="What the columns mean">i</button></span><span class="muted small">every RFQ: what you knew, what you did, what was true, what the flow oracle did</span></div>
       <div class="scroll">
-        <table class="grid" id="rv-tickets-table"><thead><tr>
+        <table class="grid" id="rv-tickets-table" data-glossary="reveal.tickets"><thead><tr>
           <th>Time</th><th class="r">RFQ</th><th>Client</th><th>Who it was</th><th class="r">Size</th><th>Type</th>
-          <th class="r">Your quote</th><th>Outcome</th><th class="r">60s</th><th class="r">300s</th><th class="r">Next event</th><th>Flow oracle</th>
+          <th class="r">Your quote</th><th>Outcome</th><th class="r">Your position after</th>
+          <th class="r">Mark-out 60s</th><th class="r">Mark-out 300s</th><th class="r">Mark-out to next print/move</th><th>Flow oracle</th>
         </tr></thead><tbody></tbody></table>
       </div>
     </div>
@@ -360,13 +379,14 @@
 
   <section class="rv-body" id="rv-track" hidden>
     <div class="panel fill">
-      <div class="panel-head"><span class="title">Track record</span><span class="muted small">every session; practice replays shown, never counted</span></div>
+      <div class="panel-head"><span class="title">Track record <button class="info" data-info="reveal.track" title="What the columns mean">i</button></span><span class="muted small">every session; practice replays shown, never counted</span></div>
       <p id="rv-track-pooled" class="rv-text"></p>
-      <table class="grid rv-track-gaps" id="rv-track-gaps"><thead><tr>
+      <div class="lbl">Pooled <button class="info" data-info="reveal.track_gaps" title="What the columns mean">i</button></div>
+      <table class="grid rv-track-gaps" id="rv-track-gaps" data-glossary="reveal.track_gaps"><thead><tr>
         <th>Against the disciplined bot</th><th class="r">Pooled</th><th class="r">Mean per session</th><th class="r">Standard error</th>
       </tr></thead><tbody></tbody></table>
       <div class="scroll">
-        <table class="grid" id="rv-track-table"><thead>
+        <table class="grid" id="rv-track-table" data-glossary="reveal.track"><thead>
           <tr class="group"><th colspan="3"></th><th colspan="6">P&amp;L</th><th colspan="4">Risk-adjusted</th><th></th></tr>
           <tr>
             <th>Session</th><th class="r">Preset</th><th class="r">Seed</th>

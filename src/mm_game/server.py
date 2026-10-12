@@ -28,8 +28,8 @@ import tornado.netutil
 import tornado.web
 import tornado.websocket
 
-from mm_game import records
-from mm_game.config import GameConfig
+from mm_game import glossary, records
+from mm_game.config import GameConfig, ScoringConfig
 from mm_game.engine import Settings
 from mm_game.game import Game, fresh_seed
 from mm_game.host import Host, WallClock
@@ -70,10 +70,22 @@ class _Static(tornado.web.StaticFileHandler):
         self.set_header("Cache-Control", "no-store")
 
 
+class _Glossary(tornado.web.RequestHandler):
+    """What every column means, for the page's (i) panels: the same
+    definitions summary.md prints. Nothing about any session."""
+
+    def get(self) -> None:
+        tables = records.glossary_tables(GameConfig().to_record(), ScoringConfig().capture_ratio_min_usd)
+        self.set_header("Content-Type", "application/json")
+        self.set_header("Cache-Control", "no-store")
+        self.write(records.dumps(glossary.message(tables)))
+
+
 def make_app(host: Host) -> tornado.web.Application:
     return tornado.web.Application(
         [
             (r"/ws", _Socket, {"host": host}),
+            (r"/glossary", _Glossary),
             (r"/(.*)", _Static, {"path": str(WEB_DIR), "default_filename": "index.html"}),
         ]
     )
@@ -115,6 +127,7 @@ def make_reveal_app(records_dir: str) -> tornado.web.Application:
         [
             (r"/record/([A-Za-z0-9_.-]+)", _Record, {"storage": storage}),
             (r"/track", _Track, {"storage": storage}),
+            (r"/glossary", _Glossary),
             (r"/(.*)", _Static, {"path": str(WEB_DIR), "default_filename": "index.html"}),
         ]
     )

@@ -76,23 +76,23 @@ function pnlValue(r, key) {
 function renderPnl(store) {
   const { rows, tiles } = store.desk.pnl;
   const clients = rows.filter((r) => r.kind === "client");
-  const venue = rows.filter((r) => r.kind !== "client");
+  const broker = rows.filter((r) => r.kind !== "client");
   /** @param {string} id @param {number} v */
   const tile = (id, v) => { set(id, usd(v)); setClass($(id), `num tile-v ${tone(v)}`); };
   tile("tile-edge", tiles.edge_client_usd);
-  tile("tile-venue", tiles.venue_charge_usd);
+  tile("tile-broker", tiles.venue_charge_usd);
   tile("tile-move", tiles.move_usd);
   tile("tile-total", tiles.total_usd);
   set("tile-edge-sub", `price vs screen at the time · ${clients.length} fill${clients.length === 1 ? "" : "s"}`);
-  const venueLots = venue.reduce((n, r) => n + Math.abs(r.quantity), 0);
-  set("tile-venue-sub", `${venue.length} hedge${venue.length === 1 ? "" : "s"}, ${venueLots} lots`);
+  const brokerLots = broker.reduce((n, r) => n + Math.abs(r.quantity), 0);
+  set("tile-broker-sub", `${broker.length} hedge${broker.length === 1 ? "" : "s"}, ${brokerLots} lots`);
   set("tile-total-sub", `realised ${usd(tiles.realised_usd)} · unrealised ${usd(tiles.unrealised_usd)}`);
 
   const { key, dir } = pnlSort.s;
   const sorted = [...rows].sort((a, b) => dir * (pnlValue(a, key) - pnlValue(b, key)) || b.seq - a.seq);
   tbody("pnl-table").innerHTML = sorted.map((r) => {
     const ticket = r.kind === "client" ? `RFQ ${r.ordinal}` : r.kind === "hedge" ? "Hedge" : "Close";
-    const withWhom = r.kind === "client" ? `C${r.client_id} · ${shortCategory(r.category ?? "")}` : r.kind === "hedge" ? "venue" : "close";
+    const withWhom = r.kind === "client" ? `C${r.client_id} · ${shortCategory(r.category ?? "")}` : r.kind === "hedge" ? "broker" : "close";
     return `<tr data-seq="${r.seq}"><td>${mmss(r.step * store.dt)}</td><td>${ticket}</td><td>${withWhom}</td>
       <td>${r.quantity > 0 ? "bought" : "sold"} ${Math.abs(r.quantity)}</td>
       <td class="r">${price(r.price)}</td><td class="r">${price(r.screen_then)}</td>

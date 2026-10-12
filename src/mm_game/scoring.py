@@ -497,7 +497,11 @@ def diagnostics(world, events, trades: Sequence[Trade]) -> dict[str, Any]:
         )
 
     # Clients: what each did with you, and -- revealed -- what they knew.
-    # net_lots is your side: positive when you bought from the client.
+    # net_lots is your side: positive when you bought from the client. The
+    # mark-outs are also split by ticket: fills on informed RFQs, and the
+    # rest. An informed-type client asking outside its information window is
+    # an uninformed RFQ, so its fills count with the rest -- lumping them by
+    # client type would charge the informed column for flow that knew nothing.
     client_horizons = ("60s", "300s", NEXT_EVENT)
     clients = {}
     for c in world.schedule.clients:
@@ -505,26 +509,35 @@ def diagnostics(world, events, trades: Sequence[Trade]) -> dict[str, Any]:
             "category": c.category.value,
             "informed_type": c.informed_type,
             "rfqs": 0,
+            "informed_rfqs": 0,
             "quoted": 0,
             "won": 0,
+            "informed_fills": 0,
             "lots": 0,
             "net_lots": 0,
             "markouts_usd": {k: 0.0 for k in client_horizons},
             "markouts_excluded": {k: 0 for k in client_horizons},
+            "markouts_by_fill_usd": {
+                kind: {k: 0.0 for k in client_horizons} for kind in ("informed", "other")
+            },
             "informed_about": [],
         }
     for ordinal, row in table.items():
         c = clients[row["rfq"]["client_id"]]
         c["rfqs"] += 1
+        c["informed_rfqs"] += fill_type(rfqs[ordinal]) != "uninformed"
         res = row.get("resolved")
         if res is not None and res["outcome"] != "passed":
             c["quoted"] += 1
     for t in trades:
         if t.source is Source.CLIENT:
             c = clients[rfqs[t.rfq_ordinal].client_id]
+            informed = fill_type(rfqs[t.rfq_ordinal]) != "uninformed"
             c["won"] += 1
+            c["informed_fills"] += informed
             c["lots"] += abs(t.quantity)
             c["net_lots"] += t.quantity
+            split = c["markouts_by_fill_usd"]["informed" if informed else "other"]
             for key in c["markouts_usd"]:
                 cell = marks[t.seq].get(key)
                 if cell is None:
@@ -533,6 +546,7 @@ def diagnostics(world, events, trades: Sequence[Trade]) -> dict[str, Any]:
                     c["markouts_excluded"][key] += 1
                 else:
                     c["markouts_usd"][key] += cell["pnl_bp"] * usd
+                    split[key] += cell["pnl_bp"] * usd
     seen_views = set()
     for q in rfqs:
         if q.informed_about is None or (q.client_id, q.informed_about.kind, q.informed_about.index) in seen_views:

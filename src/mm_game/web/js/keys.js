@@ -18,6 +18,7 @@ import * as P from "./protocol.js";
  * @property {(text: string | null, ms?: number) => void} hint
  * @property {(box: {text: string} | null) => void} box
  * @property {(open: boolean) => void} handbook
+ * @property {(key: string | null) => void} glossary  open one table's (i) panel, or close it
  * @property {() => void} cycleTab
  */
 
@@ -57,10 +58,16 @@ export function quotePrices(mid, skew, halfWidth, tick, ticket) {
  * @param {{store: Store, send: (message: P.Action) => void, ui: Ui, now?: () => number}} deps
  */
 export function createControls({ store, send, ui, now = () => performance.now() }) {
-  /** @type {{skew: number, halfWidth: number, box: {text: string} | null, lastF: number, handbook: boolean}} */
-  const c = { skew: 0, halfWidth: DEFAULT_HALF_WIDTH, box: null, lastF: -Infinity, handbook: false };
+  /** @type {{skew: number, halfWidth: number, box: {text: string} | null, lastF: number, overlay: "handbook" | "glossary" | null}} */
+  const c = { skew: 0, halfWidth: DEFAULT_HALF_WIDTH, box: null, lastF: -Infinity, overlay: null };
   const ticket = () => (store.state ? store.state.ticket : null);
   const live = () => !!store.state && store.state.status === "live";
+  // Reading the handbook or an (i) panel pauses the clock, and it stays
+  // paused when the window shuts: you resume with Space when you are ready.
+  const pauseToRead = () => {
+    const st = store.state;
+    if (st && st.status === "live" && !st.clock.paused) send(P.pause());
+  };
 
   const actions = {
     /** @param {number} d */
@@ -117,15 +124,23 @@ export function createControls({ store, send, ui, now = () => performance.now() 
       if (!st || st.status !== "live") return;
       send(st.clock.paused ? P.resume() : P.pause());
     },
-    // The handbook pauses the clock and leaves it paused when it closes:
-    // you resume with Space when you are ready, not when a window shuts.
     toggleHandbook() {
-      if (c.handbook) { c.handbook = false; ui.handbook(false); return; }
-      if (!store.begun || store.summary) return; // the start screen already shows it
-      c.handbook = true;
+      if (c.overlay === "handbook") { c.overlay = null; ui.handbook(false); return; }
+      if (c.overlay || !store.begun || store.summary) return; // the start screen already shows it
+      c.overlay = "handbook";
       ui.handbook(true);
-      const st = store.state;
-      if (st && st.status === "live" && !st.clock.paused) send(P.pause());
+      pauseToRead();
+    },
+    /** @param {string} key  the table whose columns to explain */
+    openGlossary(key) {
+      if (c.overlay === "handbook" || store.summary) return;
+      c.overlay = "glossary";
+      ui.glossary(key);
+      if (store.begun) pauseToRead();
+    },
+    closeGlossary() {
+      if (c.overlay === "glossary") c.overlay = null;
+      ui.glossary(null);
     },
     /** @param {number} n */
     speed(n) { if (live()) send(P.setSpeed(n)); },
@@ -149,9 +164,13 @@ export function createControls({ store, send, ui, now = () => performance.now() 
       else if (key === "Escape") actions.boxCancel();
       return true;
     }
-    // While the handbook is open, nothing trades.
-    if (c.handbook) {
+    // While the handbook or an (i) panel is open, nothing trades.
+    if (c.overlay === "handbook") {
       if ((key === "?" || key === "Escape") && !e.repeat) actions.toggleHandbook();
+      return true;
+    }
+    if (c.overlay === "glossary") {
+      if (key === "Escape" && !e.repeat) actions.closeGlossary();
       return true;
     }
     if (e.repeat && NO_REPEAT.has(key)) return true;

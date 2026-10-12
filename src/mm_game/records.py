@@ -39,7 +39,7 @@ from typing import Any, Callable
 
 import numpy as np
 
-from mm_game import agents
+from mm_game import agents, glossary
 from mm_game import reveal as reveal_module
 from mm_game import rng as rng_module
 from mm_game import scoring as sc
@@ -57,7 +57,9 @@ TRACK_FORMAT = "mm_game.track_record"
 # Each file's layout has its own version. A bump adds a reader for the old
 # version to the tables below and a saved fixture; it never removes one.
 REPLAY_FORMAT_VERSION = 1
-RECORD_FORMAT_VERSION = 2  # 2: the reveal block, the protocol version
+# 2: the reveal block, the protocol version. 3: clients' informed RFQs and
+# fills, and their mark-outs split by ticket (informed fills, other fills).
+RECORD_FORMAT_VERSION = 3
 TRACK_FORMAT_VERSION = 1
 
 
@@ -196,13 +198,14 @@ def load_coaching_record(record: dict[str, Any]) -> dict[str, Any]:
     return reader(record)
 
 
-def _rebuild_format_1(record: dict[str, Any]) -> dict[str, Any]:
-    """Format 1 lacks the reveal block. It carries everything needed to
-    replay itself -- header, settings, both configs, flags, actions -- so it
-    is rebuilt in the current layout: the world regenerates from the
-    header, the actions re-apply, the bots re-run. Format-1 records were
-    written under protocol 2 (the stay-readable rule starts there), so the
-    actions are read as protocol 2."""
+def _rebuild(record: dict[str, Any]) -> dict[str, Any]:
+    """An older coaching record, rebuilt in the current layout. Format 1
+    lacks the reveal block; format 2 lacks the clients' split by ticket.
+    Each carries everything needed to replay itself -- header, settings,
+    both configs, flags, actions -- so the world regenerates from the
+    header, the actions re-apply, the bots re-run, and the record is built
+    again with today's definitions. Both were written under protocol 2 (the
+    stay-readable rule starts there), so the actions are read as protocol 2."""
     rf = _read_replay_format1_protocol2(
         {k: record[k] for k in ("header", "settings", "scoring_config", "benchmark_config", "flags", "actions")}
     )
@@ -212,7 +215,7 @@ def _rebuild_format_1(record: dict[str, Any]) -> dict[str, Any]:
 
 
 # format version -> reader (or migration to the current layout). Add, never remove.
-_RECORD_READERS = {1: _rebuild_format_1, 2: lambda record: record}
+_RECORD_READERS = {1: _rebuild, 2: _rebuild, 3: lambda record: record}
 
 
 def drive(session: Session, actions: list[dict[str, Any]]) -> None:
@@ -518,7 +521,17 @@ BOT_LABEL = (
 
 
 def _horizon(key: str) -> str:
-    return key.replace("_", " ")
+    return "next print/move" if key == sc.NEXT_EVENT else key
+
+
+def glossary_tables(config: dict[str, Any], per_session_min_usd: float) -> dict[str, glossary.Table]:
+    """The column definitions for a session with this config, as summary.md
+    and the page both show them."""
+    return glossary.tables(
+        horizons_s=tuple(config["markout_horizons_s"]),
+        per_session_min_usd=per_session_min_usd,
+        pooled_min_usd=POOLED_MIN_GAP_USD,
+    )
 
 
 def pooled_ratio_text(ratio: float | None, gap_usd: float, threshold_usd: float, show: Callable[[float], str]) -> str:
@@ -571,6 +584,7 @@ def markdown_summary(record: dict[str, Any], track: dict[str, Any] | None = None
     preset = record["settings"]["preset"]
     flags = record["flags"]
     horizons = list(dec["by_horizon"])
+    definitions = glossary_tables(cfg, record["capture_ratio"]["min_gap_usd"])
     lines = [f"# Session summary — {minutes:g} minutes{' (preset)' if preset else ''}, seed {h['seed']}", ""]
     if flags["replay_of_played_seed"]:
         lines += ["**Replay of a seed already played** — excluded from the track record.", ""]
@@ -611,10 +625,10 @@ def markdown_summary(record: dict[str, Any], track: dict[str, Any] | None = None
         "",
         "Every line is a contribution to P&L; each column adds up to the total. Adverse "
         "selection is your fills' mark-outs at that horizon — negative when the flow moved "
-        "against you. Next event marks each fill through the next print or the end of the "
-        "next unannounced move, whichever comes first.",
+        "against you. The mark-out to next print/move runs each fill through the next print or "
+        "the end of the next unannounced move, whichever comes first.",
         "",
-        "| | " + " | ".join(_horizon(k) for k in horizons) + " |",
+        "| | " + " | ".join(glossary.markout_label(k) for k in horizons) + " |",
         "|---" * (1 + len(horizons)) + "|",
         "| Spread captured | " + " | ".join(_signed(dec["spread_captured_usd"]) for _ in horizons) + " |",
         "| Adverse selection | " + " | ".join(_signed(dec["by_horizon"][k]["adverse_selection_usd"]) for k in horizons) + " |",
@@ -626,7 +640,7 @@ def markdown_summary(record: dict[str, Any], track: dict[str, Any] | None = None
         "",
         "Adverse selection by who was on the other side (these add up to the line above):",
         "",
-        "| | " + " | ".join(_horizon(k) for k in horizons) + " |",
+        "| | " + " | ".join(glossary.markout_label(k) for k in horizons) + " |",
         "|---" * (1 + len(horizons)) + "|",
     ]
     for t, label in TYPE_LABEL.items():
@@ -640,7 +654,7 @@ def markdown_summary(record: dict[str, Any], track: dict[str, Any] | None = None
     )
     lines += [
         "",
-        f"Hedging and closing splits into the venue's charge {_signed(dec['venue_charge_usd'])} and the screen's "
+        f"Hedging and closing splits into the broker's charge {_signed(dec['venue_charge_usd'])} and the screen's "
         f"error when you hedged {_signed(dec['screen_error_on_hedges_usd'])}."
         + (f" Fills left out of adverse selection (mark-out cut off by the close, or no print or move after): {excluded}; "
            "their moves stay in inventory." if excluded else ""),
@@ -671,10 +685,12 @@ def markdown_summary(record: dict[str, Any], track: dict[str, Any] | None = None
         "## Clients",
         "",
         "Mark-outs are P&L contributions from your fills with that client. True type and what "
-        "each informed client knew are revealed now.",
+        "each informed client knew are revealed now. The mark-out to next print/move is split by "
+        "ticket: fills on informed RFQs, and the rest — an informed client asking outside its "
+        "information window is an uninformed RFQ.",
         "",
-        "| Client | Category | True type | RFQs | Quoted | Won | Lots | Your net lots | 60s | 300s | Next event | Knew about |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "| " + " | ".join(definitions["summary.clients"].labels()) + " |",
+        "|---" * len(definitions["summary.clients"].entries) + "|",
     ]
     for cid, c in sorted(d["clients"].items(), key=lambda kv: int(kv[0])):
         knew = "; ".join(
@@ -683,11 +699,15 @@ def markdown_summary(record: dict[str, Any], track: dict[str, Any] | None = None
             for k in c["informed_about"]
         ) or "—"
         mk = c["markouts_usd"]
+        split = c["markouts_by_fill_usd"]
+        other_fills = c["won"] - c["informed_fills"]
         lines.append(
             f"| {cid} | {c['category'].replace('_', ' ')} | {'informed' if c['informed_type'] else 'uninformed'} | "
-            f"{c['rfqs']} | {c['quoted']} | {c['won']} | {c['lots']} | {c['net_lots']:+d} | "
+            f"{c['rfqs']} | {c['informed_rfqs']} ({c['informed_fills']}) | {c['quoted']} | {c['won']} | {c['lots']} | "
+            f"{c['net_lots']:+d} | "
             f"{_signed(mk['60s']) if c['won'] else '—'} | {_signed(mk['300s']) if c['won'] else '—'} | "
-            f"{_signed(mk[sc.NEXT_EVENT]) if c['won'] else '—'} | {knew} |"
+            f"{_signed(split['informed'][sc.NEXT_EVENT]) if c['informed_fills'] else '—'} | "
+            f"{_signed(split['other'][sc.NEXT_EVENT]) if other_fills else '—'} | {knew} |"
         )
     lines.append("")
 
@@ -749,6 +769,8 @@ def markdown_summary(record: dict[str, Any], track: dict[str, Any] | None = None
                 f"{_minutes(ex['start_step'], dt)}, {ex['mean_error_bp']:+.2f}bp off the truth on average."
             )
     lines.append("")
+    keys = tuple(k for k in glossary.SUMMARY_TABLES if track is not None or k != "summary.track")
+    lines += glossary.markdown(definitions, keys)
     return "\n".join(lines)
 
 

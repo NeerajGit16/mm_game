@@ -1,0 +1,447 @@
+{
+ "actions": [
+  {
+   "ask": 9550.5,
+   "bid": 9549.5,
+   "rfq_ordinal": 0,
+   "seq": 0,
+   "step": 166,
+   "type": "quote"
+  },
+  {
+   "seq": 1,
+   "speed": 4,
+   "step": 166,
+   "type": "set_speed"
+  },
+  {
+   "ask": 9551.0,
+   "bid": 9550.0,
+   "rfq_ordinal": 1,
+   "seq": 2,
+   "step": 464,
+   "type": "quote"
+  },
+  {
+   "ask": 9551.25,
+   "bid": 9550.25,
+   "rfq_ordinal": 2,
+   "seq": 3,
+   "step": 604,
+   "type": "quote"
+  },
+  {
+   "ask": 9551.0,
+   "bid": 9550.0,
+   "rfq_ordinal": 3,
+   "seq": 4,
+   "step": 697,
+   "type": "quote"
+  },
+  {
+   "ask": 9551.0,
+   "bid": 9550.0,
+   "rfq_ordinal": 4,
+   "seq": 5,
+   "step": 724,
+   "type": "quote"
+  },
+  {
+   "ask": 9550.25,
+   "bid": 9549.25,
+   "rfq_ordinal": 5,
+   "seq": 6,
+   "step": 1174,
+   "type": "quote"
+  },
+  {
+   "ask": 9550.25,
+   "bid": 9549.25,
+   "rfq_ordinal": 6,
+   "seq": 7,
+   "step": 1242,
+   "type": "quote"
+  },
+  {
+   "ask": 9550.0,
+   "bid": 9549.0,
+   "rfq_ordinal": 7,
+   "seq": 8,
+   "step": 1279,
+   "type": "quote"
+  },
+  {
+   "rfq_ordinal": 8,
+   "seq": 9,
+   "step": 1918,
+   "type": "timer_expired"
+  },
+  {
+   "ask": 9550.75,
+   "bid": 9549.75,
+   "rfq_ordinal": 9,
+   "seq": 10,
+   "step": 3790,
+   "type": "quote"
+  },
+  {
+   "ask": 9550.0,
+   "bid": 9549.0,
+   "rfq_ordinal": 10,
+   "seq": 11,
+   "step": 4039,
+   "type": "quote"
+  },
+  {
+   "ask": 9550.25,
+   "bid": 9549.0,
+   "rfq_ordinal": 11,
+   "seq": 12,
+   "step": 4081,
+   "type": "quote"
+  },
+  {
+   "ask": 9550.0,
+   "bid": 9549.0,
+   "rfq_ordinal": 12,
+   "seq": 13,
+   "step": 4286,
+   "type": "quote"
+  },
+  {
+   "seq": 14,
+   "speed": 1,
+   "step": 4842,
+   "type": "set_speed"
+  },
+  {
+   "seq": 15,
+   "step": 6000,
+   "type": "pause"
+  },
+  {
+   "seq": 16,
+   "step": 6000,
+   "type": "resume"
+  },
+  {
+   "ask": 9549.5,
+   "bid": 9548.0,
+   "rfq_ordinal": 13,
+   "seq": 17,
+   "step": 6057,
+   "type": "quote"
+  },
+  {
+   "ask": 9549.75,
+   "bid": 9548.25,
+   "rfq_ordinal": 14,
+   "seq": 18,
+   "step": 7236,
+   "type": "quote"
+  },
+  {
+   "ask": 9549.25,
+   "bid": 9547.75,
+   "rfq_ordinal": 15,
+   "seq": 19,
+   "step": 7812,
+   "type": "quote"
+  },
+  {
+   "ask": 9548.75,
+   "bid": 9547.0,
+   "rfq_ordinal": 16,
+   "seq": 20,
+   "step": 8323,
+   "type": "quote"
+  },
+  {
+   "rfq_ordinal": 17,
+   "seq": 21,
+   "step": 8482,
+   "type": "timer_expired"
+  },
+  {
+   "ask": 9548.5,
+   "bid": 9546.75,
+   "rfq_ordinal": 18,
+   "seq": 22,
+   "step": 9030,
+   "type": "quote"
+  },
+  {
+   "ask": 9549.5,
+   "bid": 9548.0,
+   "rfq_ordinal": 19,
+   "seq": 23,
+   "step": 9969,
+   "type": "quote"
+  },
+  {
+   "ask": 9550.75,
+   "bid": 9548.0,
+   "rfq_ordinal": 20,
+   "seq": 24,
+   "step": 10108,
+   "type": "quote"
+  },
+  {
+   "quantity": -10,
+   "seq": 25,
+   "step": 10108,
+   "type": "hedge"
+  },
+  {
+   "ask": 9549.0,
+   "bid": 9547.5,
+   "rfq_ordinal": 21,
+   "seq": 26,
+   "step": 10461,
+   "type": "quote"
+  },
+  {
+   "ask": 9549.0,
+   "bid": 9547.5,
+   "rfq_ordinal": 22,
+   "seq": 27,
+   "step": 10634,
+   "type": "quote"
+  },
+  {
+   "seq": 28,
+   "speed": 4,
+   "step": 11442,
+   "type": "set_speed"
+  },
+  {
+   "ask": 9545.75,
+   "bid": 9543.5,
+   "rfq_ordinal": 23,
+   "seq": 29,
+   "step": 11567,
+   "type": "quote"
+  },
+  {
+   "ask": 9545.0,
+   "bid": 9543.75,
+   "rfq_ordinal": 24,
+   "seq": 30,
+   "step": 12188,
+   "type": "quote"
+  },
+  {
+   "ask": 9545.0,
+   "bid": 9544.0,
+   "rfq_ordinal": 25,
+   "seq": 31,
+   "step": 12205,
+   "type": "quote"
+  },
+  {
+   "rfq_ordinal": 26,
+   "seq": 32,
+   "step": 12506,
+   "type": "timer_expired"
+  },
+  {
+   "ask": 9545.5,
+   "bid": 9544.5,
+   "rfq_ordinal": 27,
+   "seq": 33,
+   "step": 12512,
+   "type": "quote"
+  },
+  {
+   "ask": 9545.0,
+   "bid": 9544.0,
+   "rfq_ordinal": 28,
+   "seq": 34,
+   "step": 12555,
+   "type": "quote"
+  },
+  {
+   "ask": 9545.75,
+   "bid": 9544.75,
+   "rfq_ordinal": 29,
+   "seq": 35,
+   "step": 13740,
+   "type": "quote"
+  },
+  {
+   "ask": 9545.75,
+   "bid": 9544.75,
+   "rfq_ordinal": 30,
+   "seq": 36,
+   "step": 14323,
+   "type": "quote"
+  },
+  {
+   "seq": 37,
+   "step": 15000,
+   "type": "quit"
+  }
+ ],
+ "benchmark_config": {
+  "disciplined_close_lead_s": 120.0,
+  "disciplined_half_width_bp": [
+   1.0,
+   0.5,
+   0.5,
+   0.5
+  ],
+  "disciplined_hedge_lead_s": 180.0,
+  "disciplined_inventory_cap_lots": 100,
+  "disciplined_inventory_target_lots": 100,
+  "disciplined_pre_print_widen_bp": 0.25,
+  "disciplined_pre_print_window_s": 600.0,
+  "disciplined_print_carry_lots": 25,
+  "disciplined_print_widen_bp": 0.0,
+  "disciplined_print_window_s": 120.0,
+  "disciplined_size_widen_bp": 0.25,
+  "disciplined_skew_bp_per_100_lots": 0.75,
+  "naive_half_width_bp": 0.5,
+  "oracle_informed_widen_bp": 0.5,
+  "oracle_lean_bp": 0.25,
+  "oracle_lean_s": 300.0
+ },
+ "flags": {
+  "ended_early_at_step": 15000,
+  "replay_of_played_seed": false
+ },
+ "format": "mm_game.replay",
+ "format_version": 1,
+ "header": {
+  "bit_generator": "PCG64",
+  "canary": {
+   "exponential": [
+    0.5959818996696361,
+    1.5023122620235008,
+    0.3654006347627972,
+    0.5182260944437272,
+    0.1858248913841722,
+    1.8799180322568223,
+    0.47694721171670634,
+    0.1607491123108291
+   ],
+   "normal": [
+    1.0121395440320466,
+    -0.8884190466634407,
+    -1.6098766486664007,
+    1.7086221260735914,
+    0.3653358462363417,
+    0.050640144829229274,
+    0.7896599733115955,
+    -0.42471957299739915
+   ],
+   "uniform": [
+    0.6102693685918309,
+    0.8856108863769525,
+    0.5060689109120532,
+    0.38579341660724853,
+    0.9400262934616919,
+    0.6377295697663863,
+    0.8016447928952133,
+    0.6377681574555134
+   ]
+  },
+  "config": {
+   "bp_per_point": 100.0,
+   "client_tolerance_bp": 0.75,
+   "client_tolerance_log_sd": 0.4,
+   "client_tolerance_size_growth": 0.5,
+   "close_liquidation_multiplier": 1.5,
+   "competitor_error_bp": 0.15,
+   "competitor_error_corr_s": 120.0,
+   "competitor_half_spread_bp": 0.5,
+   "competitor_participation_prob": 0.6,
+   "competitor_print_widen": 1.0,
+   "competitor_print_window_s": 120.0,
+   "competitor_screen_weight": 0.75,
+   "competitor_size_widen_bp": 0.5,
+   "crowd_drift_tilt": 0.6,
+   "drift_duration_max_s": 900.0,
+   "drift_duration_min_s": 300.0,
+   "drift_magnitude_max_bp": 2.0,
+   "drift_magnitude_min_bp": 1.0,
+   "drift_prob_agree": 0.6,
+   "dt": 0.1,
+   "event_count_probs": [
+    0.0,
+    1.0
+   ],
+   "event_end_margin_s": 600.0,
+   "event_min_gap_s": 1800.0,
+   "event_min_time_s": 600.0,
+   "hedge_cost_bp": 1.0,
+   "hedge_impact_bp": 0.5,
+   "hedge_margin_bp": 0.25,
+   "hedge_print_widen": 1.0,
+   "hedge_print_window_s": 120.0,
+   "informed_accuracy": 0.8,
+   "informed_activity_multiplier": 1.0,
+   "informed_edge_given_up": 0.5,
+   "informed_participation_multiplier": 1.0,
+   "informed_prob_corporate": 0.05,
+   "informed_prob_hedge_fund": 0.5,
+   "informed_prob_real_money": 0.15,
+   "informed_signal_noise": 0.25,
+   "informed_size_factor_max": 3.0,
+   "informed_size_factor_min": 1.0,
+   "informed_size_ref_bp": 1.5,
+   "jump_size_max_bp": 4.0,
+   "jump_size_min_bp": 2.0,
+   "lot_size": 1,
+   "markout_horizons_s": [
+    10.0,
+    60.0,
+    300.0
+   ],
+   "move_duration_max_s": 60.0,
+   "move_duration_min_s": 30.0,
+   "move_edge_margin_s": 300.0,
+   "move_lead_max_s": 300.0,
+   "move_lead_min_s": 120.0,
+   "move_magnitude_max_bp": 3.5,
+   "move_magnitude_min_bp": 2.0,
+   "move_min_gap_s": 300.0,
+   "move_print_clearance_s": 300.0,
+   "move_rate_per_free_hour": 0.0,
+   "n_competitors": 3,
+   "n_corporates": 1,
+   "n_hedge_funds": 2,
+   "n_real_money": 3,
+   "one_way_prob_informed": 0.1,
+   "one_way_prob_uninformed": 0.05,
+   "position_limit_lots": 200,
+   "rfq_rate_per_hour": 100.0,
+   "screen_noise_bp": 0.5,
+   "screen_noise_corr_s": 90.0,
+   "screen_refresh_s": 5.0,
+   "session_length": 1800,
+   "size_cap_lots": 100,
+   "size_log_sd": 0.9,
+   "size_median_lots": 10.0,
+   "start_level": 9550.0,
+   "tick_size": 0.25,
+   "tick_value": 12.5,
+   "trading_days_per_year": 252,
+   "trading_hours_per_day": 24.0,
+   "vol_annual_bp": 90.0
+  },
+  "config_schema_version": 2,
+  "numpy_version": "2.4.6",
+  "scheme_version": 1,
+  "seed": 3
+ },
+ "protocol_version": 2,
+ "scoring_config": {
+  "capture_ratio_min_usd": 2000.0,
+  "decomposition_horizon_s": 300.0,
+  "risk_kappa": 2.1e-05
+ },
+ "settings": {
+  "preset": 30,
+  "pricing_timer_s": 15.0
+ }
+}
