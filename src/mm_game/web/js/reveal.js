@@ -7,13 +7,15 @@
 // your position against the benchmarks and the clients revealed; on the
 // right, cards at their natural height -- the score and capture ratio, the
 // truth-based breakdown with its horizon switch, the three moments (each
-// marks the charts when clicked), the bots' rules. The page scrolls as a
-// whole. Tabs: Clients (full), Tickets (every RFQ), Track record. Every
-// panel has an (i) with what its columns mean.
+// marks the charts when clicked), the unannounced moves with the lean
+// before each, the bots' rules. The page scrolls as a whole. Tabs: Clients
+// (full), Tickets (every RFQ, under a chart of your wins against the best
+// other dealer and the screen's error), Track record. Every panel has an
+// (i) with what its columns mean.
 
-import { createRevealCharts } from "./reveal_chart.js";
+import { createRevealCharts, createWinsChart } from "./reveal_chart.js";
 import { hideGlossary, showGlossary } from "./glossary.js";
-import { escapeHtml, longCategory, mmss, money, percent, price, shortCategory, signedInt, tone } from "./format.js";
+import { escapeHtml, gap, longCategory, mmss, money, percent, price, shortCategory, signedBp2, signedInt, tone } from "./format.js";
 
 /** @typedef {import("./protocol.js").CoachingRecord} CoachingRecord */
 /** @typedef {import("./protocol.js").TrackMsg} TrackMsg */
@@ -205,6 +207,29 @@ function moments(record, charts) {
   }
 }
 
+/**
+ * A lean before a move: bp toward the move and, in brackets, the quotes it
+ * covers; — with none.
+ * @param {import("./protocol.js").Lean} l
+ */
+const leanCell = (l) => `<td class="r ${tone(l.mean_bp)}">${l.mean_bp === null ? "—" : `${signedBp2(l.mean_bp)}bp (${l.quotes})`}</td>`;
+
+/**
+ * Each unannounced move with your lean before it, and the flow oracle's and
+ * the disciplined bot's beside it.
+ * @param {CoachingRecord} record
+ */
+function moves(record) {
+  const all = record.diagnostics.position.moves;
+  const b = record.benchmarks;
+  const dt = record.header.config.dt;
+  body("rv-moves").innerHTML = all.map((m, i) => `<tr data-move="${m.move_index}">
+    <td>${m.move_index + 1} · ${mmss(m.start_step * dt)}</td><td class="r">${signedBp2(m.size_bp)}bp</td><td class="r">${(m.lead_s / 60).toFixed(1)} min</td>
+    ${leanCell(m.lean_before)}${leanCell(b.oracle.summary.lean_before_moves[i])}${leanCell(b.disciplined.summary.lean_before_moves[i])}</tr>`).join("");
+  $("rv-moves").hidden = !all.length;
+  $("rv-moves-none").hidden = all.length > 0;
+}
+
 // -- the tabs ------------------------------------------------------------------
 
 /** @param {CoachingRecord} record */
@@ -271,7 +296,7 @@ function ticketsTab(record) {
     return `<tr data-rfq="${r.ordinal}" class="${o && o.outcome === "won" ? "" : "muted"}"><td>${mmss(r.step * cfg.dt)}</td><td class="r">${r.ordinal}</td>
       <td>${client ? `C${client.client_id} · ${shortCategory(client.category)}` : "—"}</td><td>${whoItWas(record, r)}</td>
       <td class="r">${rfq ? rfq.size : "—"}</td><td>${type}</td><td class="r">${quote}</td><td>${outcome}</td>
-      <td class="r">${o ? signedInt(o.position_after) : "—"}</td>
+      <td class="r">${gap(r.vs_best_dealer_bp)}</td><td class="r">${o ? signedInt(o.position_after) : "—"}</td>
       ${mk("60s")}${mk("300s")}${mk("next_event")}<td>${oracleDid(oracle.get(r.ordinal))}</td></tr>`;
   }).join("");
 }
@@ -353,8 +378,13 @@ export function showReveal({ record, track, savedTo, sessionId }) {
   clientsTab(record);
   ticketsTab(record);
   trackTab(track, sessionId);
+  moves(record);
   fitLeft();
   const charts = createRevealCharts($("rv-chart"), $("rv-pos"), $("rv-tip"), record);
+  const wins = createWinsChart($("rv-wins"), $("rv-tip"), record);
+  const unplotted = record.rfqs.filter((r) => r.outcome && r.outcome.outcome === "won" && r.vs_best_dealer_bp === null).length;
+  $("rv-wins-note").textContent = `${plural(wins.wins.length, "win")} with a cover`
+    + (unplotted ? `; ${unplotted} with nobody else in, not drawn` : "");
   moments(record, charts);
   window.addEventListener("resize", fitLeft);
   for (const b of /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll("#rv-horizons [data-horizon]"))) {
@@ -372,6 +402,6 @@ export function showReveal({ record, track, savedTo, sessionId }) {
   bots.checked = false;
   bots.addEventListener("change", () => charts.showBots(bots.checked));
   // For the console and the browser tests.
-  /** @type {any} */ (window).mmReveal = { record, track, charts, horizons: HORIZON_LABEL, showTab };
+  /** @type {any} */ (window).mmReveal = { record, track, charts, wins, horizons: HORIZON_LABEL, showTab };
   return charts;
 }

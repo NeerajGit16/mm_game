@@ -74,7 +74,8 @@ DESK = {
     "v": LEAF, "type": LEAF, "step": LEAF,
     "blotter": [{
         **{k: LEAF for k in ("ordinal", "step", "client_id", "category", "size", "one_way", "side", "in_comp", "bid",
-                             "ask", "outcome", "quantity", "price", "revealed_side", "position_after")},
+                             "ask", "outcome", "quantity", "price", "revealed_side", "vs_best_dealer_bp",
+                             "position_after")},
         "learned": LEARNED,
     }],
     "clients": [{

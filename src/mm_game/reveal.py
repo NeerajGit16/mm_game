@@ -3,7 +3,8 @@ session and kept in the coaching record, so the page can draw the reveal
 from the record alone, with no world and no engine.
 
 The reveal block carries: the truth (sampled every second) and the screen
-as paths; each print with its jump and run-up; each unannounced move with
+as paths, and the screen's error against the truth on the same seconds;
+each print with its jump and run-up; each unannounced move with
 its leak window; every fill and hedge with who was on the other side; the
 disciplined bot's and the flow oracle's fills, positions and what each did
 on every RFQ; the three moments; and the bots' rules.
@@ -348,9 +349,16 @@ def build(
     every = max(1, round(TRUTH_EVERY_S / config.dt))
     trades = list(session.book.trades)
     windows = {w.event_index: w for w in path.drift_windows}
+    sampled = range(0, path.n_steps + 1, every)
     return {
         "truth": {"every_steps": every, "values": [round(float(v), 4) for v in path.values[::every]]},
         "screen": {"steps": [int(s) for s in view.screen_steps], "mids": [float(m) for m in view.screen]},
+        # The screen showing minus the truth, on the truth's grid: how far off
+        # the mid you priced from was, second by second.
+        "screen_error": {
+            "every_steps": every,
+            "bp": [round(view.screen_at(k) - float(path.values[k]), 4) for k in sampled],
+        },
         "prints": [
             {
                 "index": i,

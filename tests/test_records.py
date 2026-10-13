@@ -408,6 +408,34 @@ def test_summary_reveals_moves_and_every_client():
     assert "| | Mark-out 10s | Mark-out 60s | Mark-out 300s | Mark-out to next print/move |" in summary
 
 
+def _keys(obj) -> set[str]:
+    """Every key anywhere in a nested record."""
+    if isinstance(obj, dict):
+        return set(obj) | {k for v in obj.values() for k in _keys(v)}
+    if isinstance(obj, list):
+        return {k for v in obj for k in _keys(v)}
+    return set()
+
+
+def test_no_new_record_or_summary_times_how_long_quotes_took_to_reflect_an_event():
+    """Quotes are the screen plus a skew, and the screen refreshes at a
+    print, so the first quote after one reflects the jump by construction:
+    "quotes reflected it after Xs" measured the wait for the next RFQ, not
+    the player. A session with prints and unannounced moves has it nowhere --
+    not in the record, the bots' results, or summary.md -- while each print
+    and move keeps its line. Saved sessions' summary.md keep theirs (checked
+    with the old-format records)."""
+    cfg = GameConfig.for_session(120)
+    seed = next(s for s in range(100) if len(world.generate(cfg, s).path.move_list) >= 2)
+    g, storage = headless(cfg, seed, preset=120)
+    _, record, summary = files(storage, g)
+    assert record["diagnostics"]["position"]["into_prints"] and record["diagnostics"]["position"]["moves"]
+    assert not {k for k in _keys(record) if "reflect" in k}
+    assert "reflected" not in summary and "never moved half" not in summary
+    assert summary.count("- Print ") == len(record["diagnostics"]["position"]["into_prints"])
+    assert summary.count("**Unannounced move ") == len(record["diagnostics"]["position"]["moves"])
+
+
 def test_reveal_is_sent_once_and_only_after_the_end(drill_game):
     g, _ = drill_game
     assert g.record is not None

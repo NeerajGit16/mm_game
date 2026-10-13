@@ -274,6 +274,10 @@ table.grid.wrap td:first-child { white-space: nowrap; }
 .swatch.screen { background: #6b737c; height: 2px; vertical-align: 3px; }
 .swatch.runup { background: rgba(170, 170, 70, 0.35); }
 .swatch.move { background: rgba(140, 100, 220, 0.45); }
+.swatch.error { background: #c9ced4; height: 2px; vertical-align: 3px; }
+#rv-tickets { gap: 8px; }
+.rv-wins-panel { flex: 0 0 auto; }
+#rv-wins { height: 260px; flex: none; }
 .ring { color: var(--accent); margin: 0 3px 0 10px; }
 .hedge-sq { color: #c9ced4; margin: 0 3px 0 10px; }
 .disc-mark, .disc-line { color: #9aa3ad; }

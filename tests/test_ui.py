@@ -267,6 +267,38 @@ def text(play: Play, selector: str) -> str:
     return play.js(f"document.querySelector({selector!r}).textContent")
 
 
+def test_the_blotter_shows_each_price_against_the_best_other_dealer(play):
+    """After a run of tickets, every blotter row's "vs best dealer" is
+    worked out again from the engine's own log -- the quote it sent and
+    what the resolution said -- by the definition: side x (cover or level -
+    your price on that side), blank when there was no other price or you
+    did not quote that side. The column sits where its header is, and
+    shows at least one win and one done-away. A column computed from the
+    wrong side, or shifted by one cell, fails here."""
+    play_some(play, 16)
+    sent = {e.data["rfq_ordinal"]: e.data for e in play.events("quote_sent")}
+    resolved = {e.data["rfq_ordinal"]: e.data for e in play.events("rfq_resolved")}
+
+    def by_hand(o: int) -> str:
+        res, q = resolved[o], sent.get(o, {})
+        if res["outcome"] not in ("won", "done_away") or res["cover"] is None:
+            return ""
+        mine = q.get("ask") if res["side"] == 1 else q.get("bid")
+        if mine is None:
+            return ""
+        x = res["side"] * (res["cover"] - mine)
+        return "0.00" if x == 0 else f"{'+' if x > 0 else '−'}{abs(x):.2f}"
+
+    heads = play.js("[...document.querySelectorAll('#blotter thead th')].map(h => h.textContent)")
+    col = heads.index("vs best dealer")
+    rows = play.js("[...document.querySelectorAll('#blotter tbody tr')].map(r => [...r.children].map(c => c.textContent))")
+    done = {int(r[1]): r[col] for r in rows if int(r[1]) in resolved}
+    assert set(done) == set(resolved)
+    assert done == {o: by_hand(o) for o in resolved}
+    kinds = {resolved[o]["outcome"] for o, v in done.items() if v}
+    assert {"won", "done_away"} <= kinds, kinds
+
+
 def test_the_handbook_is_on_the_start_screen_and_question_mark_pauses_the_clock(play):
     """Before the session starts, the start screen shows the handbook below
     the keys -- your desk, the market, and Part 3 locked with its count.

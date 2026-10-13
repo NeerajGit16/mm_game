@@ -62,7 +62,7 @@
             <table class="grid" id="blotter" data-glossary="play.blotter">
               <thead><tr>
                 <th>Time</th><th class="r">RFQ</th><th>Client</th><th class="r">Size</th><th>Type</th>
-                <th class="r">Your bid / ask</th><th>Outcome</th><th>What you learned</th><th class="r">Pos</th>
+                <th class="r">Your bid / ask</th><th>Outcome</th><th>What you learned</th><th class="r">vs best dealer</th><th class="r">Pos</th>
               </tr></thead>
               <tbody></tbody>
             </table>
@@ -340,6 +340,14 @@
         <div id="rv-moments"></div>
       </div>
       <div class="panel">
+        <div class="panel-head"><span class="title">Unannounced moves <button class="info" data-info="reveal.moves" title="What the columns mean">i</button></span><span class="muted small">lean before each: bp toward the move (quotes)</span></div>
+        <table class="grid" id="rv-moves" data-glossary="reveal.moves"><thead>
+          <tr class="group"><th colspan="3"></th><th colspan="3">Lean before the move</th></tr>
+          <tr><th>Move</th><th class="r">Size</th><th class="r">Leaked</th><th class="r">You</th><th class="r">Flow oracle</th><th class="r">Disciplined bot</th></tr>
+        </thead><tbody></tbody></table>
+        <p id="rv-moves-none" class="muted small" hidden>No unannounced moves this session.</p>
+      </div>
+      <div class="panel">
         <details class="rv-rules" id="rv-rules-box">
           <summary class="title">The benchmarks' rules</summary>
           <ul id="rv-rules"></ul>
@@ -365,12 +373,23 @@
   </section>
 
   <section class="rv-body" id="rv-tickets" hidden>
+    <div class="panel rv-wins-panel">
+      <div class="panel-head">
+        <span class="title">Wins vs best dealer, by side <button class="info" data-info="reveal.wins" title="What the chart shows">i</button></span>
+        <span class="legend">
+          <span class="buy">▲</span> client sold to you <span class="sell">▼</span> client bought from you
+          <span class="swatch error"></span>screen − truth
+        </span>
+      </div>
+      <div class="rv-controls"><span class="muted small" id="rv-wins-note"></span><span class="muted small">bp · drag to zoom · double-click to reset · hover a win for its ticket</span></div>
+      <div id="rv-wins" class="chart-box"></div>
+    </div>
     <div class="panel fill">
       <div class="panel-head"><span class="title">Tickets <button class="info" data-info="reveal.tickets" title="What the columns mean">i</button></span><span class="muted small">every RFQ: what you knew, what you did, what was true, what the flow oracle did</span></div>
       <div class="scroll">
         <table class="grid" id="rv-tickets-table" data-glossary="reveal.tickets"><thead><tr>
           <th>Time</th><th class="r">RFQ</th><th>Client</th><th>Who it was</th><th class="r">Size</th><th>Type</th>
-          <th class="r">Your quote</th><th>Outcome</th><th class="r">Your position after</th>
+          <th class="r">Your quote</th><th>Outcome</th><th class="r">vs best dealer</th><th class="r">Your position after</th>
           <th class="r">Mark-out 60s</th><th class="r">Mark-out 300s</th><th class="r">Mark-out to next print/move</th><th>Flow oracle</th>
         </tr></thead><tbody></tbody></table>
       </div>

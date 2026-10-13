@@ -218,18 +218,30 @@ def test_the_bots_rules_on_the_reveal_are_their_config(bench):
 
 
 CLIENT_SPLIT = {"informed_rfqs", "informed_fills", "markouts_by_fill_usd"}
+REACTION = {"quotes_reflected_print_after", "quotes_reflected_move_after"}
 
 
-@pytest.mark.parametrize("name,version", [("protocol2-format1-config2", 1), ("protocol2-replay1-record2-track1-config2", 2)])
+def without(d: dict, keys) -> dict:
+    return {k: v for k, v in d.items() if k not in keys}
+
+
+@pytest.mark.parametrize("name,version", [
+    ("protocol2-format1-config2", 1),
+    ("protocol2-replay1-record2-track1-config2", 2),
+    ("protocol2-replay1-record3-track1-config2", 3),
+])
 def test_an_old_format_record_opens_in_the_current_layout(name, version):
-    """A coaching record saved under format 1 (before the reveal block) or
-    2 (before the clients' split by ticket) loads as the current format:
-    rebuilt from what it carries (header, settings, configs, actions) with
-    today's definitions -- the reveal block, the split -- and with exactly
-    the scores, decomposition, events and per-client numbers it was saved
-    with. Its summary.md stays as it was written. A loader that refused it,
-    rebuilt a different session, or rewrote what the player read at the
-    time, strands or falsifies a real session."""
+    """A coaching record saved under format 1 (before the reveal block), 2
+    (before the clients' split by ticket) or 3 (before the price against the
+    best other dealer, the screen's error and the leans before moves) loads
+    as the current format: rebuilt from what it carries (header, settings,
+    configs, actions) with today's definitions, and with exactly the scores,
+    decomposition, events, RFQ layers, bots' results and per-client numbers
+    it was saved with -- only the fields each later format added differ,
+    and the time quotes took to reflect a print is gone. Its summary.md
+    stays as it was written. A loader that refused it, rebuilt a different
+    session, or rewrote what the player read at the time, strands or
+    falsifies a real session."""
     storage = DirectoryStorage(FIXTURES / name)
     base = "sessions/30m-3-0001"
     old = json.loads(storage.read_text(f"{base}/coaching_record.json"))
@@ -237,19 +249,34 @@ def test_an_old_format_record_opens_in_the_current_layout(name, version):
     assert old["format_version"] == version and ("reveal" in old) == (version >= 2)
     new = records.load_coaching_record(old)
     assert new["format_version"] == records.RECORD_FORMAT_VERSION and "reveal" in new
-    for key in ("scores", "decomposition", "capture_ratio", "benchmarks", "rfqs", "events"):
+    for key in ("scores", "decomposition", "capture_ratio", "events"):
         assert new[key] == old[key], key
-    assert {k: v for k, v in new["diagnostics"].items() if k != "clients"} == {
-        k: v for k, v in old["diagnostics"].items() if k != "clients"}
-    for cid, c in old["diagnostics"]["clients"].items():
-        rebuilt = new["diagnostics"]["clients"][cid]
-        assert {k: v for k, v in rebuilt.items() if k not in CLIENT_SPLIT} == c, cid
-        assert set(rebuilt) - set(c) == CLIENT_SPLIT
-    if version == 2:
+    assert [without(r, {"vs_best_dealer_bp"}) for r in new["rfqs"]] == old["rfqs"]
+    assert any(r["vs_best_dealer_bp"] is not None for r in new["rfqs"])
+    for b, res in old["benchmarks"].items():
+        assert without(new["benchmarks"][b], {"summary"}) == without(res, {"summary"}), b
+        assert without(new["benchmarks"][b]["summary"], {"lean_before_moves"}) == res["summary"], b
+    d_new, d_old = new["diagnostics"], old["diagnostics"]
+    assert without(d_new, {"clients", "position", "wins_vs_best_dealer"}) == without(d_old, {"clients", "position"})
+    assert without(d_new["position"], {"into_prints", "moves"}) == without(d_old["position"], {"into_prints", "moves"})
+    assert d_new["position"]["into_prints"] == [without(p, REACTION) for p in d_old["position"]["into_prints"]]
+    assert [without(m, {"lean_before"}) for m in d_new["position"]["moves"]] == [
+        without(m, REACTION) for m in d_old["position"]["moves"]]
+    assert d_old["position"]["into_prints"] and all(REACTION & set(p) for p in d_old["position"]["into_prints"])
+    for cid, c in d_old["clients"].items():
+        rebuilt = d_new["clients"][cid]
+        assert without(rebuilt, CLIENT_SPLIT) == without(c, CLIENT_SPLIT), cid
+        assert set(rebuilt) - set(c) == (CLIENT_SPLIT if version < 3 else set())
+    if version >= 2:
         for key in ("truth", "screen", "prints", "moves", "fills", "positions", "bots", "rules"):
             assert new["reveal"][key] == old["reveal"][key], key
+        assert "screen_error" not in old["reveal"] and "screen_error" in new["reveal"]
+    if version >= 3:
+        assert new["reveal"]["moments"] == old["reveal"]["moments"]
     assert storage.read_text(f"{base}/summary.md") == summary
     assert records.markdown_summary(new) != summary  # today's columns, in a summary nobody stored
+    # The stored summary keeps the reaction time it was written with; today's has none.
+    assert "quotes reflected it after 72s" in summary and "reflected" not in records.markdown_summary(new)
 
 
 def test_a_ticket_moment_stops_where_the_rule_says():

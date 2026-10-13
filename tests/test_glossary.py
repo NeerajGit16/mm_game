@@ -105,7 +105,9 @@ def test_the_intended_meanings_are_the_ones_written():
     mark-out is size times how far the truth moved, edge excluded, + your
     way; the next-print/move mark-out runs to whichever comes first; the
     play screen's mark-outs say they are against the screen."""
-    t = glossary.tables(horizons_s=(10.0, 60.0, 300.0), per_session_min_usd=2000.0, pooled_min_usd=10_000.0)
+    t = glossary.tables(
+        horizons_s=(10.0, 60.0, 300.0), per_session_min_usd=2000.0, pooled_min_usd=10_000.0, tick_bp=0.25, win_half_bp=0.5
+    )
     by = {e.label: e.meaning for e in t["reveal.clients"].entries}
     assert "buys plus your sells" in by["Lots traded (gross)"]
     assert "+ when on balance you bought" in by["Your net (+ = you bought)"]

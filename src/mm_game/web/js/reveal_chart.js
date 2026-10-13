@@ -14,7 +14,7 @@
 // time -- at the print; at the ramp of a move, with its leak window
 // shaded; at a ticket, with that fill's marker highlighted.
 
-import { longCategory, mmss, money, price } from "./format.js";
+import { gap, longCategory, mmss, money, price, signedBp2 } from "./format.js";
 
 /** @typedef {import("./protocol.js").CoachingRecord} CoachingRecord */
 /** @typedef {import("./protocol.js").RevealFill} RevealFill */
@@ -504,3 +504,119 @@ export function createRevealCharts(chartEl, posEl, tipEl, record) {
 }
 
 /** @typedef {ReturnType<typeof createRevealCharts>} RevealCharts */
+
+/**
+ * Wins vs best dealer, by side: every win that had a cover, at its time and
+ * by how far it beat the best other dealer -- ▲ blue when the client sold
+ * to you, ▼ orange when it bought from you -- over the screen's error
+ * against the truth every second. One axis, in bp: a run of wide wins on
+ * one side lines up with the screen off the other way.
+ * @param {HTMLElement} el
+ * @param {HTMLElement} tipEl
+ * @param {CoachingRecord} record
+ */
+export function createWinsChart(el, tipEl, record) {
+  const dt = record.header.config.dt;
+  const err = record.reveal.screen_error;
+  const xs = err.bp.map((_, i) => i * err.every_steps * dt);
+  const clients = new Map(record.world.clients.map((c) => [c.client_id, c]));
+  const wins = record.rfqs.flatMap((r) => {
+    const o = r.outcome;
+    if (!o || o.outcome !== "won" || r.vs_best_dealer_bp === null || !r.observable) return [];
+    return [{ r, o, gap: r.vs_best_dealer_bp, bought: o.quantity > 0, screenError: r.observable.screen_mid - r.hidden.true_fair_value }];
+  });
+  const state = { drawn: { bought: 0, sold: 0 } };
+  /** @type {Hit[]} */
+  let hits = [];
+
+  /** @param {(typeof wins)[number]} w */
+  function tip(w) {
+    const c = clients.get(w.r.observable ? w.r.observable.client.client_id : -1);
+    const who = c ? `client ${c.client_id} (${longCategory(c.category)})` : "";
+    return `<b>RFQ ${w.r.ordinal}</b> · ${mmss(w.r.step * dt)} · ${who}`
+      + `<br>client ${w.bought ? "sold to you" : "bought from you"}: you ${w.bought ? "bought" : "sold"} ${Math.abs(w.o.quantity)} at ${price(w.o.price)}`
+      + `<br>vs best dealer ${gap(w.gap)}bp · screen − truth then ${signedBp2(w.screenError)}bp`;
+  }
+
+  /** @param {UPlot} u */
+  function draw(u) {
+    const ctx = u.ctx;
+    const r = ratio();
+    const s = 6 * r;
+    hits = [];
+    state.drawn = { bought: 0, sold: 0 };
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(u.bbox.left, u.bbox.top, u.bbox.width, u.bbox.height);
+    ctx.clip();
+    const y0 = u.valToPos(0, "y", true);
+    ctx.strokeStyle = COLOR.axis;
+    ctx.lineWidth = r;
+    ctx.beginPath(); ctx.moveTo(u.bbox.left, y0); ctx.lineTo(u.bbox.left + u.bbox.width, y0); ctx.stroke();
+    for (const w of wins) {
+      const x = u.valToPos(w.r.step * dt, "x", true);
+      const y = u.valToPos(w.gap, "y", true);
+      triangle(ctx, x, y, s, w.bought, w.bought ? COLOR.buy : COLOR.sell, true);
+      hits.push({ x: x / r, y: y / r, html: tip(w) });
+      state.drawn[w.bought ? "bought" : "sold"] += 1;
+    }
+    ctx.restore();
+  }
+
+  /** @param {UPlot} u */
+  function hover(u) {
+    const { left, top } = u.cursor;
+    if (left === undefined || top === undefined || left < 0) { tipEl.hidden = true; return; }
+    const ox = u.bbox.left / ratio();
+    const oy = u.bbox.top / ratio();
+    let best = null;
+    let bestD = 10;
+    for (const h of hits) {
+      const d = Math.hypot(h.x - ox - left, h.y - oy - top);
+      if (d < bestD) { best = h; bestD = d; }
+    }
+    if (!best) { tipEl.hidden = true; return; }
+    const rect = u.over.getBoundingClientRect();
+    tipEl.innerHTML = best.html;
+    tipEl.style.left = `${rect.left + left + 14}px`;
+    tipEl.style.top = `${rect.top + top + 14}px`;
+    tipEl.hidden = false;
+  }
+
+  const ys = [0, ...err.bp, ...wins.map((w) => w.gap)];
+  const lo = Math.min(...ys);
+  const hi = Math.max(...ys);
+  /** @type {Options} */
+  const opts = {
+    ...size(el, 200),
+    legend: { show: false },
+    cursor: { drag: { x: true, y: false }, points: { show: false } },
+    scales: { x: { time: false }, y: { range: () => [Math.floor(lo * 4) / 4 - 0.25, Math.ceil(hi * 4) / 4 + 0.25] } },
+    axes: [
+      { stroke: COLOR.axis, font: FONT, grid: { stroke: COLOR.grid, width: 1 }, ticks: { stroke: COLOR.grid, width: 1 },
+        values: (u, splits) => splits.map((v) => mmss(v)) },
+      { stroke: COLOR.axis, font: FONT, size: 60, grid: { stroke: COLOR.grid, width: 1 }, ticks: { stroke: COLOR.grid, width: 1 },
+        label: "bp", labelFont: FONT, labelSize: 16, labelGap: 0,
+        values: (u, splits) => splits.map((v) => (v > 0 ? `+${v.toFixed(2)}` : v.toFixed(2))) },
+    ],
+    series: [{}, { label: "screen − truth", stroke: COLOR.hedge, width: 1.25, points: { show: false } }],
+    hooks: { draw: [draw], setCursor: [hover] },
+  };
+  const chart = new uPlot(opts, [xs, err.bp], el);
+  el.addEventListener("mouseleave", () => { tipEl.hidden = true; });
+  new ResizeObserver(() => chart.setSize(size(el, 200))).observe(el);
+  return {
+    state,
+    /** Wins plotted, by side: the client sold to you (you bought), or bought from you. */
+    wins: wins.map((w) => ({ rfq: w.r.ordinal, step: w.r.step, gap: w.gap, bought: w.bought })),
+    /**
+     * Where a point is on the page, for pointing at it.
+     * @param {number} step
+     * @param {number} bp
+     */
+    pointOf(step, bp) {
+      const rect = chart.over.getBoundingClientRect();
+      return { x: rect.left + chart.valToPos(step * dt, "x"), y: rect.top + chart.valToPos(bp, "y") };
+    },
+  };
+}

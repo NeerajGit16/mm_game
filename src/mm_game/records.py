@@ -39,7 +39,7 @@ from typing import Any, Callable
 
 import numpy as np
 
-from mm_game import agents, glossary
+from mm_game import agents, desk, glossary
 from mm_game import reveal as reveal_module
 from mm_game import rng as rng_module
 from mm_game import scoring as sc
@@ -59,7 +59,10 @@ TRACK_FORMAT = "mm_game.track_record"
 REPLAY_FORMAT_VERSION = 1
 # 2: the reveal block, the protocol version. 3: clients' informed RFQs and
 # fills, and their mark-outs split by ticket (informed fills, other fills).
-RECORD_FORMAT_VERSION = 3
+# 4: each RFQ's price against the best other dealer, wins bucketed by it,
+# the screen's error every second, the lean before each move (yours and
+# each bot's); the time quotes took to reflect a print or move, dropped.
+RECORD_FORMAT_VERSION = 4
 TRACK_FORMAT_VERSION = 1
 
 
@@ -200,12 +203,14 @@ def load_coaching_record(record: dict[str, Any]) -> dict[str, Any]:
 
 def _rebuild(record: dict[str, Any]) -> dict[str, Any]:
     """An older coaching record, rebuilt in the current layout. Format 1
-    lacks the reveal block; format 2 lacks the clients' split by ticket.
-    Each carries everything needed to replay itself -- header, settings,
-    both configs, flags, actions -- so the world regenerates from the
-    header, the actions re-apply, the bots re-run, and the record is built
-    again with today's definitions. Both were written under protocol 2 (the
-    stay-readable rule starts there), so the actions are read as protocol 2."""
+    lacks the reveal block; format 2 lacks the clients' split by ticket;
+    format 3 lacks the prices against the best other dealer, the screen's
+    error and the leans before moves. Each carries everything needed to
+    replay itself -- header, settings, both configs, flags, actions -- so
+    the world regenerates from the header, the actions re-apply, the bots
+    re-run, and the record is built again with today's definitions. All
+    were written under protocol 2 (the stay-readable rule starts there), so
+    the actions are read as protocol 2."""
     rf = _read_replay_format1_protocol2(
         {k: record[k] for k in ("header", "settings", "scoring_config", "benchmark_config", "flags", "actions")}
     )
@@ -215,7 +220,7 @@ def _rebuild(record: dict[str, Any]) -> dict[str, Any]:
 
 
 # format version -> reader (or migration to the current layout). Add, never remove.
-_RECORD_READERS = {1: _rebuild, 2: _rebuild, 3: lambda record: record}
+_RECORD_READERS = {1: _rebuild, 2: _rebuild, 3: _rebuild, 4: lambda record: record}
 
 
 def drive(session: Session, actions: list[dict[str, Any]]) -> None:
@@ -352,14 +357,19 @@ def rfq_layers(world: World, session: Session) -> list[dict[str, Any]]:
     layers = []
     for rfq in world.schedule.rfqs:
         t = trades_by_rfq.get(rfq.ordinal)
+        action, outcome = actions.get(rfq.ordinal), outcomes.get(rfq.ordinal)
         layers.append(
             {
                 "ordinal": rfq.ordinal,
                 "step": rfq.step,
                 "shown": rfq.ordinal in observable,
                 "observable": observable.get(rfq.ordinal),
-                "action": actions.get(rfq.ordinal),
-                "outcome": outcomes.get(rfq.ordinal),
+                "action": action,
+                "outcome": outcome,
+                # From the action and the outcome alone, as the blotter shows it in play.
+                "vs_best_dealer_bp": None if action is None or outcome is None else desk.vs_best_dealer_bp(
+                    outcome["outcome"], outcome["side"], action["bid"], action["ask"], outcome["cover"]
+                ),
                 "hidden": {
                     "true_fair_value": float(path.values[rfq.step]),
                     "side": int(rfq.side),
@@ -422,6 +432,7 @@ def bot_result(world: World, session: Session, scoring: ScoringConfig) -> dict[s
             "lots_by_type": {k: v["lots"] for k, v in d["flow"].items() if isinstance(v, dict)},
             "max_abs_position": d["position"]["max_abs"],
             "time_weighted_mean_abs_position": d["position"]["time_weighted_mean_abs"],
+            "lean_before_moves": [m["lean_before"] for m in d["position"]["moves"]],
         },
         "actions": session.actions,
     }
@@ -507,6 +518,145 @@ def _minutes(step: int, dt: float) -> str:
     return f"{step * dt / 60:.1f} min"
 
 
+def signed_bp(x: float) -> str:
+    """bp to two places, signed, with no sign on zero: +0.75, −0.50, 0.00."""
+    text = f"{abs(x):.2f}"
+    return text if text == "0.00" else ("−" if x < 0 else "+") + text
+
+
+def gap_text(x: float | None) -> str:
+    """A price against the best other dealer, as the blotter shows it; blank
+    when there was nothing to compare."""
+    return "" if x is None else signed_bp(x)
+
+
+LEAN_RULE = glossary.LEAN_BEFORE_MOVE
+
+
+def lean_text(lean: dict[str, Any]) -> str:
+    if lean["mean_bp"] is None:
+        return "— (no two-sided quotes)"
+    return f"{signed_bp(lean['mean_bp'])}bp over {lean['quotes']} quote{'s' if lean['quotes'] != 1 else ''}"
+
+
+def bot_leans(record: dict[str, Any], move: int) -> tuple[tuple[str, dict[str, Any]], ...]:
+    """The flow oracle's and the disciplined bot's lean before a move."""
+    return tuple(
+        (name, record["benchmarks"][b]["summary"]["lean_before_moves"][move])
+        for b, name in (("oracle", "flow oracle"), ("disciplined", "disciplined bot"))
+    )
+
+
+def _clock(step: int, dt: float) -> str:
+    s = int(math.floor(step * dt + 1e-9))
+    return f"{s // 60:02d}:{s % 60:02d}"
+
+
+def _price(bp: float | None) -> str:
+    return "—" if bp is None else f"{bp / 100:.4f}"
+
+
+def _signed_int(n: int) -> str:
+    return f"+{n}" if n > 0 else f"−{-n}" if n < 0 else "0"
+
+
+SHORT_CATEGORY = {"hedge_fund": "HF", "real_money": "RM", "corporate": "Corp"}
+
+
+def win_gap_lines(record: dict[str, Any], labels: dict[str, str]) -> list[str]:
+    """Wins bucketed by how far they beat the best other dealer: fills, lots
+    and spread captured against the truth, adding up to every win."""
+    wins = record["diagnostics"]["wins_vs_best_dealer"]
+    lines = [
+        "## Wins against the best other dealer",
+        "",
+        "Each win by how far your price beat the best other dealer's on the side the client traded (the "
+        "\"vs best dealer\" column below). Spread captured is against the true value, as in the breakdown; the "
+        "rows add up to its spread line.",
+        "",
+        "| | Fills | Lots | Spread captured |",
+        "|---|---|---|---|",
+    ]
+    for bucket in sc.WIN_GAP_BUCKETS:
+        w = wins[bucket]
+        lines.append(f"| {labels[bucket]} | {w['fills']} | {w['lots']} | {_signed(w['spread_captured_usd'])} |")
+    total = {k: sum(w[k] for w in wins.values()) for k in ("fills", "lots", "spread_captured_usd")}
+    lines += [
+        f"| **{labels['all']}** | **{total['fills']}** | **{total['lots']}** | **{_signed(total['spread_captured_usd'])}** |",
+        "",
+    ]
+    return lines
+
+
+def _who_it_was(record: dict[str, Any], r: dict[str, Any]) -> str:
+    h = r["hidden"]
+    if h["informed"] and h["informed_about"] is not None and h["signal_bp"] is not None:
+        a = h["informed_about"]
+        rv = record["reveal"]
+        truth = rv["prints"][a["index"]]["jump_bp"] if a["kind"] == "print" else rv["moves"][a["index"]]["size_bp"]
+        right = (h["signal_bp"] > 0) == (truth > 0)
+        return f"informed · {a['kind']} {a['index'] + 1}, {'up' if h['signal_bp'] > 0 else 'down'} ({'right' if right else 'wrong'})"
+    return "uninformed"
+
+
+def _oracle_did(o: dict[str, Any] | None) -> str:
+    if o is None:
+        return "—"
+    if o["outcome"] == "passed":
+        return "passed"
+    quote = f"{_price(o['bid'])} / {_price(o['ask'])}"
+    if o["outcome"] == "won":
+        return f"{quote} → traded {_signed_int(o['quantity'])}"
+    return f"{quote} → {'done away' if o['outcome'] == 'done_away' else 'not done'}"
+
+
+def ticket_lines(record: dict[str, Any], table: glossary.Table) -> list[str]:
+    """Every RFQ you were shown, as the reveal's Tickets tab lists it."""
+    cfg = record["header"]["config"]
+    usd = cfg["tick_value"] / cfg["tick_size"]
+    oracle = {o["rfq_ordinal"]: o for o in record["reveal"]["bots"]["oracle"]["rfqs"]}
+    shown = [r for r in record["rfqs"] if r["shown"]]
+    unshown = len(record["rfqs"]) - len(shown)
+    lines = [
+        "## Tickets",
+        "",
+        "Every RFQ you were shown: who it really was, what you did, and against the true value how the fills "
+        "marked out, in dollars."
+        + (f" The {unshown} RFQ{'s' if unshown != 1 else ''} after you stopped are left out." if unshown else ""),
+        "",
+        "| " + " | ".join(table.labels()) + " |",
+        "|---" * len(table.entries) + "|",
+    ]
+    for r in shown:
+        rfq, a, o = r["observable"]["client"], r["action"], r["outcome"]
+        side = "buys" if r["hidden"]["side"] == 1 else "sells"
+        kind = f"client {side} (one-way)" if rfq["one_way"] else f"two-way · client {side}"
+        if a is None:
+            quote = "—"
+        else:
+            quote = "passed" if a["bid"] is None and a["ask"] is None else f"{_price(a['bid'])} / {_price(a['ask'])}"
+        outcome = "—" if o is None else {
+            "won": f"won · {_signed_int(o['quantity'])} at {_price(o['price'])}",
+            "done_away": f"done away at {_price(o['cover'])}",
+            "not_done": "not done",
+            "passed": "passed",
+        }[o["outcome"]]
+        marks = r["hidden"]["markouts"] or {}
+
+        def mark(key: str) -> str:
+            c = marks.get(key)
+            return "—" if c is None or c["pnl_bp"] is None or c.get("truncated") else _signed(c["pnl_bp"] * usd)
+
+        lines.append(
+            f"| {_clock(r['step'], cfg['dt'])} | {r['ordinal']} | C{rfq['client_id']} · {SHORT_CATEGORY[rfq['category']]} | "
+            f"{_who_it_was(record, r)} | {rfq['size']} | {kind} | {quote} | {outcome} | "
+            f"{gap_text(r['vs_best_dealer_bp'])} | {'—' if o is None else _signed_int(o['position_after'])} | "
+            f"{mark('60s')} | {mark('300s')} | {mark(sc.NEXT_EVENT)} | {_oracle_did(oracle.get(r['ordinal']))} |"
+        )
+    lines.append("")
+    return lines
+
+
 TYPE_LABEL = {
     "uninformed": "uninformed",
     "informed_print": "informed about a print",
@@ -531,6 +681,8 @@ def glossary_tables(config: dict[str, Any], per_session_min_usd: float) -> dict[
         horizons_s=tuple(config["markout_horizons_s"]),
         per_session_min_usd=per_session_min_usd,
         pooled_min_usd=POOLED_MIN_GAP_USD,
+        tick_bp=config["tick_size"],
+        win_half_bp=sc.WIN_GAP_HALF_BP,
     )
 
 
@@ -679,6 +831,7 @@ def markdown_summary(record: dict[str, Any], track: dict[str, Any] | None = None
         ),
         "",
     ]
+    lines += win_gap_lines(record, glossary.win_gap_labels(cfg["tick_size"], sc.WIN_GAP_HALF_BP))
 
     # -- Clients --------------------------------------------------------------
     lines += [
@@ -720,26 +873,23 @@ def markdown_summary(record: dict[str, Any], track: dict[str, Any] | None = None
     ]
     for p in pos["into_prints"]:
         drift = "none" if p["drift_bp"] is None else f"{p['drift_bp']:+.2f}bp"
-        react = p["quotes_reflected_print_after"]
         lines.append(
             f"- Print {p['print_index'] + 1} at {_minutes(p['step'], dt)}: {p['jump_bp']:+.2f}bp, "
-            f"drift into it {drift}; you carried {p['position_into_print']:+d} lots"
-            + (
-                f"; quotes reflected it after {react['seconds']:.0f}s."
-                if react
-                else ("; no quotes after it." if not p["two_sided_quotes_after_print"] else "; quotes never moved half the print.")
-            )
+            f"drift into it {drift}; you carried {p['position_into_print']:+d} lots."
         )
     if not pos["moves"]:
         lines.append("- No unannounced moves this session.")
-    for m in pos["moves"]:
-        react = m["quotes_reflected_move_after"]
+    else:
+        lines.append(f"- {LEAN_RULE}")
+    for i, m in enumerate(pos["moves"]):
+        leans = "; ".join(
+            f"{name} {lean_text(lean)}" for name, lean in (("you", m["lean_before"]), *bot_leans(record, i))
+        )
         lines.append(
             f"- **Unannounced move {m['move_index'] + 1}** at {_minutes(m['start_step'], dt)}: {m['size_bp']:+.2f}bp "
             f"over {m['duration_s']:.0f}s, leaked to informed clients {m['lead_s'] / 60:.1f} min ahead. "
             f"You held {m['position_at_inform']:+d} lots when the leak began, {m['position_at_start']:+d} at the "
-            f"start and {m['position_at_end']:+d} at the end"
-            + (f"; quotes reflected it after {react['seconds']:.0f}s." if react else "; quotes never moved half of it.")
+            f"start and {m['position_at_end']:+d} at the end. Lean before the move: {leans}."
         )
         for r in m["informed_rfqs"]:
             side = "buy" if r["client_side"] > 0 else "sell"
@@ -769,6 +919,7 @@ def markdown_summary(record: dict[str, Any], track: dict[str, Any] | None = None
                 f"{_minutes(ex['start_step'], dt)}, {ex['mean_error_bp']:+.2f}bp off the truth on average."
             )
     lines.append("")
+    lines += ticket_lines(record, definitions["summary.tickets"])
     keys = tuple(k for k in glossary.SUMMARY_TABLES if track is not None or k != "summary.track")
     lines += glossary.markdown(definitions, keys)
     return "\n".join(lines)

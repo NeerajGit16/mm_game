@@ -25,6 +25,12 @@ to it. It is a linear product, so the rows add up to the book's P&L with no
 matching of buys to sells. A venue trade's screen is read off its own fill
 (price less the side times the per-lot cost), which also covers the close
 after a quit, when no screen readings are shown in between.
+
+Each blotter row also says how your price compared with the best other
+dealer's on the side the client traded (``vs_best_dealer_bp``): what a win
+gave away, or what a done-away missed by. The cover and the done-away level
+are already on the blotter, so it is arithmetic on what the player saw.
+The record and summary.md compute it with the same function.
 """
 
 from __future__ import annotations
@@ -40,6 +46,29 @@ RECENT_INTERACTIONS = 3
 
 def _horizon_key(h: int) -> str:
     return f"{h}s"
+
+
+def vs_best_dealer_bp(
+    outcome: str | None, client_side: int | None, bid: float | None, ask: float | None, other: float | None
+) -> float | None:
+    """Your price on the side the client traded against the best other
+    dealer's, in bp, signed from your side: ``client_side`` x (other - yours),
+    where yours is your ask when the client bought and your bid when it sold.
+
+    Won: ``other`` is the cover, so it is never negative -- +0.75 means you
+    beat the best other dealer by 0.75bp, about what you gave away. Done
+    away: ``other`` is the level it traded at, so it is never positive, and
+    0.0 on a tie you lost. None when there is nothing to compare: a win with
+    nobody else in (no cover), not done, passed, or a done-away on a side
+    you did not quote."""
+    if outcome not in ("won", "done_away") or client_side is None or other is None:
+        return None
+    yours = ask if client_side == 1 else bid
+    if yours is None:
+        return None
+    # Rounded off the float noise of an off-grid tick size, and + 0.0 so a
+    # tie is 0.0: a tie on the bid side would otherwise be -0.0, and print so.
+    return round(client_side * (other - yours), 9) + 0.0
 
 
 class Desk:
@@ -112,6 +141,7 @@ class Desk:
                 "price": None,
                 "revealed_side": None,
                 "learned": None,
+                "vs_best_dealer_bp": None,
                 "position_after": None,
             }
             self._clients[r["client_id"]]["rfqs"] += 1
@@ -125,6 +155,7 @@ class Desk:
                 quantity=d["quantity"],
                 price=d["price"],
                 revealed_side=d["side"],
+                vs_best_dealer_bp=vs_best_dealer_bp(d["outcome"], d["side"], row["bid"], row["ask"], d["cover"]),
                 position_after=d["position_after"],
             )
             if d["outcome"] == "won":

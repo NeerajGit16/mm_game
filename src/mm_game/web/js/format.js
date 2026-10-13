@@ -62,6 +62,39 @@ export function bp(x, digits = 1) {
 }
 
 /**
+ * Two decimals as Python's format writes them. They differ only on an
+ * exact tie, which for two decimals is an odd eighth (0.125, 0.375, ...):
+ * toFixed rounds it up, Python to even.
+ * @param {number} a  a non-negative number
+ */
+export function fixed2(a) {
+  if (Number.isInteger(a * 8) && !Number.isInteger(a * 4)) {
+    const lo = Math.floor(a * 100);
+    return ((lo % 2 === 0 ? lo : lo + 1) / 100).toFixed(2);
+  }
+  return a.toFixed(2);
+}
+
+/**
+ * bp to two places, signed, no sign on zero: +0.75, −0.50, 0.00 -- as
+ * summary.md writes them.
+ * @param {number} x
+ */
+export function signedBp2(x) {
+  const text = fixed2(Math.abs(x));
+  return text === "0.00" ? text : (x < 0 ? MINUS : "+") + text;
+}
+
+/**
+ * A price against the best other dealer: +0.75, −0.50, 0.00 on a tie, and
+ * blank when there was nothing to compare.
+ * @param {number | null | undefined} x
+ */
+export function gap(x) {
+  return x === null || x === undefined ? "" : signedBp2(x);
+}
+
+/**
  * The CSS class for a signed number: pos, neg or nothing.
  * @param {number | null | undefined} x
  */

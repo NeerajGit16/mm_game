@@ -86,6 +86,7 @@ export const V = 2;
  * @property {number | null} price
  * @property {Side | null} revealed_side
  * @property {{cover?: number | null, side?: Side, level?: number} | null} learned
+ * @property {number | null} vs_best_dealer_bp  your price against the best other dealer's, bp, + when you beat it
  * @property {number | null} position_after
  */
 
@@ -233,6 +234,7 @@ export const V = 2;
  * @typedef {Object} RevealBlock
  * @property {{every_steps: number, values: number[]}} truth
  * @property {{steps: number[], mids: number[]}} screen
+ * @property {{every_steps: number, bp: number[]}} screen_error  the screen showing minus the truth, on the truth's grid
  * @property {{index: number, step: number, jump_bp: number, runup: {start_step: number, end_step: number, total_bp: number} | null}[]} prints
  * @property {{index: number, inform_step: number, start_step: number, end_step: number, size_bp: number}[]} moves
  * @property {RevealFill[]} fills
@@ -271,10 +273,26 @@ export const V = 2;
  * @property {number} ordinal
  * @property {number} step
  * @property {boolean} shown
+ * @property {{screen_mid: number, client: RfqPublic} | null} observable
  * @property {{bid: number | null, ask: number | null, by: string} | null} action
  * @property {{outcome: string, side: Side | null, price: number | null, cover: number | null, quantity: number, position_after: number} | null} outcome
+ * @property {number | null} vs_best_dealer_bp  your price against the best other dealer's, bp, + when you beat it
  * @property {{side: Side, informed: boolean, signal_bp: number | null, informed_about: {kind: string, index: number} | null,
- *   markouts: Record<string, {pnl_bp: number | null, truncated?: boolean}> | null}} hidden
+ *   true_fair_value: number, markouts: Record<string, {pnl_bp: number | null, truncated?: boolean}> | null}} hidden
+ */
+
+/** @typedef {{mean_bp: number | null, quotes: number}} Lean  mean (quote mid − screen) toward the move, and the quotes it covers */
+
+/**
+ * An unannounced move, from the diagnostics.
+ * @typedef {Object} MoveDiag
+ * @property {number} move_index
+ * @property {number} inform_step
+ * @property {number} start_step
+ * @property {number} end_step
+ * @property {number} size_bp
+ * @property {number} lead_s
+ * @property {Lean} lean_before
  */
 
 /** @typedef {{ratio: number | null, oracle_minus_disciplined_usd: number}} CaptureLine */
@@ -287,10 +305,10 @@ export const V = 2;
  * @property {{preset: number | null}} settings
  * @property {{replay_of_played_seed: boolean, ended_early_at_step: number | null}} flags
  * @property {{pnl_usd: number, risk_adjusted_usd: number}} scores
- * @property {Record<string, {scores: {pnl_usd: number, risk_adjusted_usd: number}}>} benchmarks
+ * @property {Record<string, {scores: {pnl_usd: number, risk_adjusted_usd: number}, summary: {lean_before_moves: Lean[]}}>} benchmarks
  * @property {{min_gap_usd: number, pnl: CaptureLine, risk_adjusted: CaptureLine}} capture_ratio
  * @property {{total_usd: number, spread_captured_usd: number, hedging_and_closing_usd: number, by_horizon: Record<string, Horizon_>}} decomposition
- * @property {{clients: Record<string, ClientReveal>}} diagnostics
+ * @property {{clients: Record<string, ClientReveal>, position: {moves: MoveDiag[]}}} diagnostics
  * @property {RfqLayer[]} rfqs
  * @property {{clients: {client_id: number, category: string, informed_type: boolean}[]}} world
  * @property {RevealBlock} reveal

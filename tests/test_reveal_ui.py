@@ -16,6 +16,7 @@ import re
 import shutil
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import pytest
 
@@ -376,12 +377,17 @@ def test_the_track_record_agrees_with_summary_md_and_the_ratio_waits_for_10000(b
             lt.close()
 
 
-@pytest.mark.parametrize("name,version", [("protocol2-format1-config2", 1), ("protocol2-replay1-record2-track1-config2", 2)])
+@pytest.mark.parametrize("name,version", [
+    ("protocol2-format1-config2", 1),
+    ("protocol2-replay1-record2-track1-config2", 2),
+    ("protocol2-replay1-record3-track1-config2", 3),
+])
 def test_an_old_format_record_opens_in_the_reveal(browser, name, version):
-    """A session saved under record format 1 (before the reveal block) or 2
-    (before the clients' split by ticket) opens in the reveal, rebuilt in
-    today's layout, with the score it was saved with and the split filled
-    in -- and its summary.md is left exactly as it was written."""
+    """A session saved under record format 1 (before the reveal block), 2
+    (before the clients' split by ticket) or 3 (before the price against the
+    best other dealer) opens in the reveal, rebuilt in today's layout, with
+    the score it was saved with, the split and the vs best dealer column
+    filled in -- and its summary.md is left exactly as it was written."""
     old = FIXTURES / name
     storage = DirectoryStorage(old)
     saved_record = json.loads(storage.read_text("sessions/30m-3-0001/coaching_record.json"))
@@ -395,6 +401,8 @@ def test_an_old_format_record_opens_in_the_reveal(browser, name, version):
         assert page.evaluate("window.mmReveal.charts.state.drawn.you") > 0
         page.click("#rv-tabs [data-rtab='clients']")
         assert all(r["Informed RFQs (filled)"] for r in page_rows(page, "rv-clients-table"))
+        page.click("#rv-tabs [data-rtab='tickets']")
+        assert any(r["vs best dealer"] for r in page_rows(page, "rv-tickets-table"))
         assert not errors, errors
     finally:
         page.close()
@@ -590,6 +598,139 @@ def test_no_text_on_the_reveal_says_venue(browser, saved):
             page.keyboard.press("Escape")
         assert [t for t in texts if "venue" in t.lower()] == []
         assert any("broker" in t.lower() for t in texts)
+        assert not errors, errors
+    finally:
+        page.close()
+        lt.close()
+
+
+# --------------------------------------------------------------------------
+# Against the best other dealer, the screen's error, the lean before a move
+# --------------------------------------------------------------------------
+
+SESSION_2 = Path(__file__).resolve().parent / "fixtures" / "play" / "30m-1793618369-0002"
+
+
+@pytest.fixture(scope="module")
+def session_2_dir(tmp_path_factory):
+    """Session 2 as played (30 minutes, seed 1793618369), rebuilt from its
+    replay file and saved where the reveal server looks for it."""
+    root = tmp_path_factory.mktemp("session2")
+    rf = records.load_replay(json.loads((SESSION_2 / "replay.json").read_text(encoding="utf-8")))
+    session, w = records.replay(rf)
+    bots = {b: agents.run_bot(b, w, settings=rf.settings, scoring=rf.scoring, benchmark=rf.benchmark) for b in agents.BOTS}
+    record = records.coaching_record(w, session, scoring=rf.scoring, benchmark=rf.benchmark, bots=bots, flags=rf.flags)
+    DirectoryStorage(root).write_text("sessions/30m-1793618369-0002/coaching_record.json", records.dumps(record))
+    return root, record
+
+
+def md_rows(md: str, header: str) -> list[dict[str, str]]:
+    lines = md.splitlines()
+    i = lines.index(header)
+    heads = [c.strip() for c in lines[i].strip("|").split("|")]
+    out = []
+    for ln in lines[i + 2:]:
+        if not ln.startswith("|"):
+            break
+        out.append(dict(zip(heads, [c.strip() for c in ln.strip("|").split("|")], strict=True)))
+    return out
+
+
+TICKET_MONEY = {"Mark-out 60s", "Mark-out 300s", "Mark-out to next print/move"}
+
+
+def test_session_2s_tickets_and_wins_on_the_reveal(browser, session_2_dir):
+    """Session 2 in the reveal. The Tickets tab is summary.md's tickets
+    table cell for cell, and its vs best dealer column reads by hand +0.50
+    (RFQ 0), blank (RFQ 1, nobody else in), 0.00 (RFQs 2 and 9: ties lost
+    on the offer and on the bid), +0.75 (RFQ 3), -1.00 (RFQ 42). The wins
+    chart draws the 20 wins that had a cover and not the two with nobody
+    else in: 12 ▲ where the client sold to him, 8 ▼ where it bought; and
+    hovering RFQ 27 says it beat the street by 0.75bp while the screen read
+    1.15bp rich. Session 2 had no unannounced moves, and the moves card says
+    so. A column out of step with its header, a win with no cover drawn at
+    zero, or the sides swapped, fails here."""
+    root, record = session_2_dir
+    md = records.markdown_summary(record)
+    labels = records.glossary_tables(record["header"]["config"], record["capture_ratio"]["min_gap_usd"])["summary.tickets"].labels()
+    want = md_rows(md, "| " + " | ".join(labels) + " |")
+    page, lt, errors = open_reveal(browser, root, "30m-1793618369-0002")
+    try:
+        assert page.is_visible("#rv-moves-none") and page.is_hidden("#rv-moves")
+        page.click("#rv-tabs [data-rtab='tickets']")
+        rows = page_rows(page, "rv-tickets-table")
+        assert len(rows) == len(want) == 49
+        for shown, md_row in zip(rows, want):
+            for label, cell in md_row.items():
+                if label in TICKET_MONEY and cell != "—":
+                    assert number(shown[label]) == number(cell), (md_row["RFQ"], label)
+                else:
+                    assert shown[label] == cell, (md_row["RFQ"], label)
+        gaps = {int(r["RFQ"]): r["vs best dealer"] for r in rows}
+        assert [gaps[o] for o in (0, 1, 2, 3, 9, 42)] == ["+0.50", "", "0.00", "+0.75", "0.00", "−1.00"]
+        wins = page.evaluate("window.mmReveal.wins.wins")
+        assert len(wins) == 20 and not {w["rfq"] for w in wins} & {1, 5}
+        assert sum(w["bought"] for w in wins) == 12
+        assert page.evaluate("window.mmReveal.wins.state.drawn") == {"bought": 12, "sold": 8}
+        assert page.text_content("#rv-wins-note") == "20 wins with a cover; 2 with nobody else in, not drawn"
+        w27 = next(w for w in wins if w["rfq"] == 27)
+        assert w27["bought"] and w27["gap"] == 0.75
+        at = page.evaluate(f"window.mmReveal.wins.pointOf({w27['step']}, {w27['gap']})")
+        page.mouse.move(at["x"], at["y"])
+        page.wait_for_function("!document.getElementById('rv-tip').hidden")
+        tip = page.text_content("#rv-tip")
+        assert "RFQ 27" in tip and "vs best dealer +0.75bp" in tip and "screen − truth then +1.15bp" in tip
+        assert not errors, errors
+    finally:
+        page.close()
+        lt.close()
+
+
+def test_the_moves_card_shows_the_leans_summary_md_prints(browser, saved):
+    """Each unannounced move's row on the reveal: your lean before it, the
+    flow oracle's and the disciplined bot's, as summary.md writes them
+    ("+0.40bp over 6 quotes" there, "+0.40bp (6)" here; "—" with none). A
+    card reading the bots' figures from the wrong bot, or out of order
+    with the moves, fails here."""
+    root, ids = saved
+    record = load(root, ids[0])
+    md = DirectoryStorage(root).read_text(f"sessions/{ids[0]}/summary.md")
+    moves = record["diagnostics"]["position"]["moves"]
+    assert moves
+
+    def cell(lean):
+        return "—" if lean["mean_bp"] is None else f"{records.signed_bp(lean['mean_bp'])}bp ({lean['quotes']})"
+
+    page, lt, errors = open_reveal(browser, root, ids[0])
+    try:
+        assert page.is_hidden("#rv-moves-none")
+        rows = page_rows(page, "rv-moves")
+        assert len(rows) == len(moves)
+        for i, (row, m) in enumerate(zip(rows, moves)):
+            leans = (m["lean_before"], *(lean for _, lean in records.bot_leans(record, i)))
+            assert [row["You"], row["Flow oracle"], row["Disciplined bot"]] == [cell(x) for x in leans]
+            line = f"Lean before the move: you {records.lean_text(leans[0])}; flow oracle {records.lean_text(leans[1])}; " \
+                   f"disciplined bot {records.lean_text(leans[2])}."
+            assert line in md
+            assert row["Move"].startswith(f"{m['move_index'] + 1} · ")
+        assert not errors, errors
+    finally:
+        page.close()
+        lt.close()
+
+
+def test_the_page_rounds_bp_as_summary_md_does(browser, saved):
+    """The page's two-decimal bp text is Python's, ties included: an odd
+    eighth such as 0.125 is a true tie, which JavaScript's toFixed rounds up
+    and Python's format rounds to even. Without the correction a lean of
+    +0.125bp would read +0.13 on the reveal and +0.12 in summary.md."""
+    root, ids = saved
+    xs = [0.125, 0.375, -0.625, 1.875, 0.135, -0.0833, 0.004, -0.004, 0.0, 2.5, -1.0]
+    page, lt, errors = open_reveal(browser, root, ids[0])
+    try:
+        texts = page.evaluate(f"async () => {{ const f = await import('/js/format.js'); return {json.dumps(xs)}.map(f.signedBp2); }}")
+        assert texts == [records.signed_bp(x) for x in xs]
+        assert texts[:2] == ["+0.12", "+0.38"]
         assert not errors, errors
     finally:
         page.close()

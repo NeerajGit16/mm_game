@@ -12,8 +12,9 @@ During play every number is against the screen: the truth stays hidden
 until the reveal. After it, mark-outs and the breakdown are against the
 true value.
 
-Pure: built from a few numbers -- the mark-out horizons and the two
-capture-ratio thresholds -- and nothing else.
+Pure: built from a few numbers -- the mark-out horizons, the two
+capture-ratio thresholds, the tick and the half-bp line the wins table is
+split at -- and nothing else.
 """
 
 from __future__ import annotations
@@ -135,17 +136,61 @@ def _lots_in(key: str) -> Entry:
     return Entry(f"Lots in {key}", f"The lots in the {key} average: your fills with the client at least {key} old.")
 
 
+VS_BEST = Entry(
+    "vs best dealer",
+    "Your price against the best other dealer's on the side the client traded, in bp: + when you beat it. Won: "
+    "the cover minus your ask when the client bought, your bid minus the cover when it sold — never −; +0.75 "
+    "means you beat the best other dealer by 0.75bp, roughly what you gave away. Done away: the same with the "
+    "level it traded at — −, or 0.00 on a tie you lost. Blank: won with nobody else in, not done, passed, or "
+    "done away on a side you didn't quote.",
+)
+
+LEAN_BEFORE_MOVE = (
+    "Lean before a move: the mean of (quote mid − screen) over the two-sided quotes from the leak to the start of "
+    "its ramp, in bp, + toward the move. Yours includes your inventory skew: it is your net lean, the one that made "
+    "or lost money on the move. The flow oracle's includes its lean on informed flow; the disciplined bot's is "
+    "inventory skew only."
+)
+
+def win_gap_labels(tick_bp: float, half_bp: float) -> dict[str, str]:
+    """Row labels for the wins table, keyed by scoring's win buckets, and the
+    total row under them. The middle bucket -- above a tie, under ``half_bp``
+    -- holds whole ticks only, so it is named by them: 0.25bp at the
+    quarter-bp tick."""
+    ticks = [k * tick_bp for k in range(1, int(half_bp / tick_bp) + 1) if k * tick_bp < half_bp - 1e-9]
+    if not ticks:
+        under = f"under {half_bp:.2f}bp"
+    elif len(ticks) == 1:
+        under = f"{ticks[0]:.2f}bp"
+    else:
+        under = f"{ticks[0]:.2f}–{ticks[-1]:.2f}bp"
+    return {
+        "tie": "0.00bp (a tie)",
+        "under_half_bp": under,
+        "half_bp_or_more": f"{half_bp:.2f}bp or more",
+        "nobody_else_in": "Nobody else in",
+        "all": "All wins",
+    }
+
+
 # --------------------------------------------------------------------------
 # The tables
 # --------------------------------------------------------------------------
 
 
 def tables(
-    *, horizons_s: tuple[float, ...], per_session_min_usd: float, pooled_min_usd: float
+    *,
+    horizons_s: tuple[float, ...],
+    per_session_min_usd: float,
+    pooled_min_usd: float,
+    tick_bp: float,
+    win_half_bp: float,
 ) -> dict[str, Table]:
     """Every table's definitions. ``horizons_s`` are the mark-out horizons
-    of the breakdown; the thresholds are the capture ratio's."""
+    of the breakdown; the thresholds are the capture ratio's; the tick and
+    the half-bp line name the buckets of the wins table."""
     keys = [horizon_key(h) for h in horizons_s] + [NEXT]
+    gaps = win_gap_labels(tick_bp, win_half_bp)
     capture_rule = (
         f"(you − disciplined) ÷ (flow oracle − disciplined) for the session; n/a unless the oracle beat the "
         f"disciplined bot by at least {_usd(per_session_min_usd)}."
@@ -214,6 +259,7 @@ def tables(
                 "Won: the cover, the next-best price. Done away: the client's side and the level it traded at. "
                 "Otherwise nothing.",
             ),
+            VS_BEST,
             Entry("Pos", "Your position after the ticket, in lots: + long, − short."),
         ),
     )
@@ -421,32 +467,74 @@ def tables(
             KNEW_ABOUT,
         ),
     )
+    tickets = (
+        Entry("Time", "When the RFQ arrived (session clock)."),
+        Entry("RFQ", "The RFQ's number in the session."),
+        CLIENT,
+        Entry(
+            "Who it was",
+            "Revealed: uninformed, or informed about a print or a move, with the way it was told and whether "
+            "that was right.",
+        ),
+        Entry("Size", "Lots the client asked for."),
+        Entry("Type", "Two-way or one-way, and the client's true side."),
+        Entry("Your quote", "Your bid / ask; passed when you passed."),
+        Entry(
+            "Outcome",
+            "Won (your size and price), done away (the level), not done or passed; on the reveal, not shown for "
+            "the RFQs after you quit.",
+        ),
+        VS_BEST,
+        Entry("Your position after", "Your position once the ticket was done, in lots: + long, − short."),
+        _truth_markout_entry("60s"),
+        _truth_markout_entry("300s"),
+        _truth_markout_entry(NEXT),
+        Entry(
+            "Flow oracle",
+            "What the flow oracle quoted on the same RFQ and what happened: traded (its size), done away, not "
+            "done, or passed.",
+        ),
+    )
     t["reveal.tickets"] = Table(
         "Tickets",
         "Every RFQ of the session: what you saw, what you did, what was true, what the flow oracle did. Mark-outs "
         "are against the true value, in dollars, for the RFQs you traded.",
+        tickets,
+    )
+    t["reveal.wins"] = Table(
+        "Wins vs best dealer, by side",
+        "Each win's vs best dealer at its time, beside the screen's error. A run of wide wins on one side while the "
+        "screen was off one way is that error, priced into your quotes and picked off by the clients. Wins with "
+        "nobody else in have no cover and are not drawn. Drag to zoom, double-click to reset, hover a point for "
+        "its ticket.",
         (
-            Entry("Time", "When the RFQ arrived (session clock)."),
-            Entry("RFQ", "The RFQ's number in the session."),
-            CLIENT,
             Entry(
-                "Who it was",
-                "Revealed: uninformed, or informed about a print or a move, with the way it was told and whether "
-                "that was right.",
+                "Client sold to you",
+                "● a win where the client sold to you (you bought): how far your bid beat the best other bid, in bp.",
             ),
-            Entry("Size", "Lots the client asked for."),
-            Entry("Type", "Two-way or one-way, and the client's true side."),
-            Entry("Your quote", "Your bid / ask; passed when you passed."),
-            Entry("Outcome", "Won (your size and price), done away (the level), not done, or not shown (after you quit)."),
-            Entry("Your position after", "Your position once the ticket was done, in lots: + long, − short."),
-            _truth_markout_entry("60s"),
-            _truth_markout_entry("300s"),
-            _truth_markout_entry(NEXT),
             Entry(
-                "Flow oracle",
-                "What the flow oracle quoted on the same RFQ and what happened: traded (its size), done away, not "
-                "done, or passed.",
+                "Client bought from you",
+                "● a win where the client bought from you (you sold): how far your offer beat the best other offer, "
+                "in bp.",
             ),
+            Entry(
+                "Screen − truth",
+                "The screen you priced from minus the true value, every second, in bp: + when the screen read rich. "
+                "Rich, clients sell to you at a bid that is too high; cheap, they buy at an offer that is too low.",
+            ),
+        ),
+    )
+    t["reveal.moves"] = Table(
+        "Unannounced moves",
+        "Each unannounced move, and how you and the benchmarks were leaning while it leaked.",
+        (
+            Entry("Move", "The move's number and when its ramp started (session clock)."),
+            Entry("Size", "How far it moved the true value, in bp."),
+            Entry("Leaked", "How long before the ramp the first informed client heard: the window the lean is over."),
+            Entry("Lean before the move", LEAN_BEFORE_MOVE + " In brackets, how many quotes it covers; — with none."),
+            Entry("You", "Your lean before the move, in bp: + toward it. It includes your inventory skew."),
+            Entry("Flow oracle", "The flow oracle's lean, the same way: it includes its lean on informed flow."),
+            Entry("Disciplined bot", "The disciplined bot's lean, the same way: inventory skew only."),
         ),
     )
     t["reveal.track_gaps"] = Table(
@@ -517,6 +605,35 @@ def tables(
             *horizon_entries,
         ),
     )
+    t["summary.wins"] = Table(
+        "Wins against the best other dealer",
+        "Your wins by how far your price beat the best other dealer's on the side the client traded (the vs best "
+        "dealer column of the tickets table). The rows add up to every win.",
+        (
+            Entry(gaps["tie"], "Won at the best other dealer's price: a tie that went your way."),
+            Entry(gaps["under_half_bp"], f"Beat the best other dealer, by less than {win_half_bp:.2f}bp."),
+            Entry(
+                gaps["half_bp_or_more"],
+                f"Beat it by {win_half_bp:.2f}bp or more: priced well through the street, usually because the "
+                "screen was off.",
+            ),
+            Entry(gaps["nobody_else_in"], "Won with no other dealer in competition: no cover to compare with."),
+            Entry(gaps["all"], "Every win; its spread captured is the breakdown's spread line."),
+            Entry("Fills", "How many of your wins."),
+            Entry("Lots", "Their lots."),
+            Entry(
+                "Spread captured",
+                "Their edge against the true value when you traded: size × (truth − price), in dollars. + is in "
+                "your favour.",
+            ),
+        ),
+    )
+    t["summary.tickets"] = Table(
+        "Tickets",
+        "Every RFQ you were shown; the reveal's Tickets tab. Mark-outs are against the true value, in dollars, for "
+        "the RFQs you traded.",
+        tickets,
+    )
     t["summary.clients"] = Table(
         "Clients",
         "Mark-outs are against the true value, in dollars: the P&L from your fills with that client.",
@@ -546,7 +663,15 @@ def md_escape(label: str) -> str:
 
 
 # The order summary.md explains its tables in.
-SUMMARY_TABLES = ("summary.score", "summary.track", "summary.breakdown", "summary.by_type", "summary.clients")
+SUMMARY_TABLES = (
+    "summary.score",
+    "summary.track",
+    "summary.breakdown",
+    "summary.by_type",
+    "summary.wins",
+    "summary.clients",
+    "summary.tickets",
+)
 
 
 def markdown(t: dict[str, Table], keys: tuple[str, ...] = SUMMARY_TABLES) -> list[str]:

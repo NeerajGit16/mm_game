@@ -6,7 +6,7 @@
 // already put on the wire, except the quote being built and where your
 // position lands if it is hit.
 
-import { ago, bp, clock, escapeHtml, longCategory, mmss, price, shortCategory, signedInt, tone, usd } from "./format.js";
+import { ago, bp, clock, escapeHtml, gap, longCategory, mmss, price, shortCategory, signedInt, tone, usd } from "./format.js";
 import { quotePrices } from "./keys.js";
 
 /** @typedef {import("./store.js").Store} Store */
@@ -231,7 +231,7 @@ function renderBlotter(store) {
     return `<tr class="${r.outcome === null ? "pending" : ""}">
       <td>${mmss(r.step * store.dt)}</td><td class="r">${r.ordinal}</td><td>C${r.client_id} · ${shortCategory(r.category)}</td>
       <td class="r">${r.size}</td><td>${type}</td><td class="r">${r.outcome === null ? "" : quoted}</td>
-      <td>${outcomeText(r)}</td><td>${learnedText(r)}</td>
+      <td>${outcomeText(r)}</td><td>${learnedText(r)}</td><td class="r">${gap(r.vs_best_dealer_bp)}</td>
       <td class="r">${r.position_after === null ? "" : signedInt(r.position_after)}</td></tr>`;
   });
   tbody("blotter").innerHTML = rows.join("");

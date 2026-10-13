@@ -1,0 +1,22 @@
+{
+ "entries": [
+  {
+   "capture_ratio_pnl": 0.006791105592131108,
+   "capture_ratio_risk_adjusted": 0.054260010613787595,
+   "config_digest": "0574520df9e8610a",
+   "disciplined_pnl_usd": -4711.000000000968,
+   "disciplined_risk_adjusted_usd": -5169.260015625968,
+   "ended_early_at_step": 15000,
+   "oracle_pnl_usd": 1731.2499999994543,
+   "oracle_risk_adjusted_usd": 1725.4890273432043,
+   "pnl_usd": -4667.250000000058,
+   "preset": 30,
+   "replay_of_played_seed": false,
+   "risk_adjusted_usd": -4795.150859375059,
+   "seed": 3,
+   "session_id": "30m-3-0001"
+  }
+ ],
+ "format": "mm_game.track_record",
+ "format_version": 1
+}

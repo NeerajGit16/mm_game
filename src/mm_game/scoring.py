@@ -28,6 +28,7 @@ import numpy as np
 
 from mm_game.book import Source, Trade
 from mm_game.config import GameConfig, ScoringConfig
+from mm_game.desk import vs_best_dealer_bp
 from mm_game.fair_value import FairValuePath, sigma_per_step
 
 # --------------------------------------------------------------------------
@@ -332,18 +333,36 @@ def _excursion(points: list[tuple[int, float]], dt: float) -> dict[str, Any] | N
     return best
 
 
-def _reaction(mids: dict[int, float], mid_steps: list[int], at: int, size_bp: float, dt: float):
-    """When the quote mid first moved at least half of ``size_bp`` its way,
-    measured from the last two-sided quote before step ``at``. None if no
-    quote before, or if quotes never got there."""
-    before = [s for s in mid_steps if s < at]
-    if not before:
-        return None
-    m0 = mids[before[-1]]
-    for s in (s for s in mid_steps if s >= at):
-        if (mids[s] - m0) * math.copysign(1.0, size_bp) >= abs(size_bp) / 2:
-            return {"steps": s - at, "seconds": (s - at) * dt}
-    return None
+def lean_before_move(table: dict[int, dict[str, Any]], screen_at, move) -> dict[str, Any]:
+    """Your net lean in the minutes a move was leaking: the mean of (quote
+    mid - screen) over your two-sided quotes from the leak (``inform_step``)
+    up to the start of the ramp, in bp, signed so + is toward the move. It
+    includes your inventory skew -- it is the lean that made or lost money
+    on the move, whatever put it there. ``mean_bp`` is None with no quotes."""
+    sign = math.copysign(1.0, move.total_bp)
+    leans = []
+    for _, row in sorted(table.items()):
+        q = row.get("quote")
+        if q is None or q["bid"] is None or q["ask"] is None:
+            continue
+        if move.inform_step <= row["step"] < move.start_step:
+            leans.append(sign * (0.5 * (q["bid"] + q["ask"]) - screen_at(row["step"])))
+    return {"mean_bp": _mean(leans), "quotes": len(leans)}
+
+
+# Wins by how far your price beat the best other dealer's: a tie, under
+# half a bp (at the quarter-bp tick, one tick), half a bp or more -- and the
+# wins with nobody else in, which have no cover to compare with.
+WIN_GAP_BUCKETS = ("tie", "under_half_bp", "half_bp_or_more", "nobody_else_in")
+WIN_GAP_HALF_BP = 0.5
+
+
+def win_gap_bucket(vs_best_bp: float | None) -> str:
+    if vs_best_bp is None:
+        return "nobody_else_in"
+    if vs_best_bp == 0:
+        return "tie"
+    return "under_half_bp" if vs_best_bp < WIN_GAP_HALF_BP else "half_bp_or_more"
 
 
 def diagnostics(world, events, trades: Sequence[Trade]) -> dict[str, Any]:
@@ -427,20 +446,30 @@ def diagnostics(world, events, trades: Sequence[Trade]) -> dict[str, Any]:
             "worst_sustained_excursion": _excursion(points, dt),
         }
 
+    # Wins by how far they beat the best other dealer: count, lots and the
+    # spread captured against the truth in each bucket. The buckets add up
+    # to every win, and their spread to the decomposition's spread line.
+    wins = {b: {"fills": 0, "lots": 0, "spread_captured_usd": 0.0} for b in WIN_GAP_BUCKETS}
+    for t in trades:
+        if t.source is not Source.CLIENT:
+            continue
+        row = table[t.rfq_ordinal]
+        q, res = row["quote"], row["resolved"]
+        w = wins[win_gap_bucket(vs_best_dealer_bp(res["outcome"], res["side"], q["bid"], q["ask"], res["cover"]))]
+        w["fills"] += 1
+        w["lots"] += abs(t.quantity)
+        w["spread_captured_usd"] += t.quantity * (path.values[t.step] - t.price) * usd
+
     # Position through time, and into each print.
     held = position_path(trades, config.n_steps)
     prints = []
-    mids = {}
-    for ordinal, row in table.items():
-        q = row.get("quote")
-        if q and q["bid"] is not None and q["ask"] is not None:
-            mids[row["step"]] = 0.5 * (q["bid"] + q["ask"])
-    mid_steps = sorted(mids)
+    two_sided = {  # steps with a two-sided quote
+        row["step"] for row in table.values()
+        if row.get("quote") and row["quote"]["bid"] is not None and row["quote"]["ask"] is not None
+    }
     for i, e in enumerate(int(x) for x in path.event_steps):
         window = next((w for w in path.drift_windows if w.event_index == i), None)
         jump = float(path.jump_sizes[i])
-        after = [s for s in mid_steps if s >= e]
-        reaction = _reaction(mids, mid_steps, e, jump, dt)
         prints.append(
             {
                 "print_index": i,
@@ -450,14 +479,13 @@ def diagnostics(world, events, trades: Sequence[Trade]) -> dict[str, Any]:
                 "drift_bp": None if window is None else window.total_bp,
                 "drift_agreed_with_print": None if window is None else (window.total_bp > 0) == (jump > 0),
                 "position_with_print": int(np.sign(held[e - 1]) * np.sign(jump)),
-                "two_sided_quotes_after_print": len(after),
-                "quotes_reflected_print_after": reaction,
+                "two_sided_quotes_after_print": sum(1 for s in two_sided if s >= e),
             }
         )
 
     # Unannounced moves, revealed: when, how big, how much warning; where the
     # position was; the informed inquiries that foretold each and what was
-    # done with them; when the quotes caught up.
+    # done with them; how the quotes leaned while it leaked.
     fills_by_rfq = {t.rfq_ordinal: t for t in trades if t.source is Source.CLIENT}
     moves = []
     for m in path.move_list:
@@ -492,7 +520,7 @@ def diagnostics(world, events, trades: Sequence[Trade]) -> dict[str, Any]:
                 "position_at_start": int(held[m.start_step]),
                 "position_at_end": int(held[min(m.end_step, len(held) - 1)]),
                 "informed_rfqs": foretold,
-                "quotes_reflected_move_after": _reaction(mids, mid_steps, m.start_step, m.total_bp, dt),
+                "lean_before": lean_before_move(table, view.screen_at, m),
             }
         )
 
@@ -574,6 +602,7 @@ def diagnostics(world, events, trades: Sequence[Trade]) -> dict[str, Any]:
             "won_left_on_table_bp": _mean(left_on_table),
             "done_away_how_far_off_bp": _mean(how_far_off),
         },
+        "wins_vs_best_dealer": wins,
         "flow": {
             **buckets,
             "informed_share_of_volume": informed_lots / total_lots if total_lots else None,
